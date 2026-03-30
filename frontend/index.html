@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0a0a0c">
+  <title>mobile-use</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Header -->
+  <div class="header">
+    <div class="header-brand">
+      <div class="header-icon">&#9889;</div>
+      <div class="header-title">mobile-use</div>
+    </div>
+    <div class="header-status" id="connStatus">connecting...</div>
+  </div>
+
+  <!-- Input -->
+  <div class="input-section">
+    <div class="input-wrapper">
+      <textarea
+        class="task-input"
+        id="taskInput"
+        placeholder="What do you want me to do?"
+        rows="1"
+      ></textarea>
+      <button class="voice-btn" id="voiceBtn" title="Voice input">
+        &#127908;
+      </button>
+    </div>
+    <div class="controls">
+      <select class="model-select" id="modelSelect">
+        <option value="gemini-2.5-flash-lite" selected>gemini-2.5-flash-lite</option>
+        <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+        <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+        <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
+      </select>
+      <button class="submit-btn" id="submitBtn">Run</button>
+    </div>
+  </div>
+
+  <!-- Status -->
+  <div class="status-card" id="statusCard">
+    <div class="progress-bar">
+      <div class="progress-fill" id="progressFill"></div>
+    </div>
+    <div class="status-header">
+      <div class="status-phase">
+        <div class="phase-dot" id="phaseDot"></div>
+        <div class="phase-label" id="phaseLabel">Starting...</div>
+      </div>
+      <div class="status-meta" id="statusMeta"></div>
+    </div>
+    <div class="status-body">
+      <div class="status-thought" id="statusThought"></div>
+    </div>
+  </div>
+
+  <!-- Stop -->
+  <button class="stop-btn" id="stopBtn">Stop Agent</button>
+
+  <!-- Completion -->
+  <div class="completion-card" id="completionCard">
+    <div class="completion-icon" id="completionIcon"></div>
+    <div class="completion-title" id="completionTitle"></div>
+    <div class="completion-summary" id="completionSummary"></div>
+    <div class="timing-grid" id="timingGrid"></div>
+  </div>
+
+  <!-- Logs -->
+  <div class="logs-section">
+    <button class="logs-toggle" id="logsToggle">
+      <span>Terminal Logs</span>
+      <span class="logs-toggle-arrow">&#9660;</span>
+    </button>
+    <div class="logs-content" id="logsContent">
+      <pre id="logsText"></pre>
+    </div>
+  </div>
+
+<script>
+(() => {
+  // ─── Elements ───
+  const taskInput = document.getElementById('taskInput');
+  const voiceBtn = document.getElementById('voiceBtn');
+  const modelSelect = document.getElementById('modelSelect');
+  const submitBtn = document.getElementById('submitBtn');
+  const statusCard = document.getElementById('statusCard');
+  const progressFill = document.getElementById('progressFill');
+  const phaseDot = document.getElementById('phaseDot');
+  const phaseLabel = document.getElementById('phaseLabel');
+  const statusMeta = document.getElementById('statusMeta');
+  const statusThought = document.getElementById('statusThought');
+  const stopBtn = document.getElementById('stopBtn');
+  const completionCard = document.getElementById('completionCard');
+  const completionIcon = document.getElementById('completionIcon');
+  const completionTitle = document.getElementById('completionTitle');
+  const completionSummary = document.getElementById('completionSummary');
+  const timingGrid = document.getElementById('timingGrid');
+  const connStatus = document.getElementById('connStatus');
+  const logsToggle = document.getElementById('logsToggle');
+  const logsContent = document.getElementById('logsContent');
+  const logsText = document.getElementById('logsText');
+
+  // ─── State ───
+  let ws = null;
+  let running = false;
+  let currentStep = 0;
+  let totalSteps = 0;
+  let startTime = 0;
+  let elapsedTimer = null;
+
+  // ─── WebSocket ───
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}`);
+
+    ws.onopen = () => {
+      connStatus.textContent = 'connected';
+      connStatus.classList.add('connected');
+    };
+
+    ws.onclose = () => {
+      connStatus.textContent = 'disconnected';
+      connStatus.classList.remove('connected');
+      setTimeout(connect, 2000);
+    };
+
+    ws.onerror = () => ws.close();
+
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      handleMessage(msg);
+    };
+  }
+
+  function handleMessage(msg) {
+    switch (msg.type) {
+      case 'status':
+        if (msg.status === 'starting') {
+          setRunning(true);
+          setPhase('thinking', 'Initializing...');
+        }
+        break;
+
+      case 'step':
+        handleStep(msg);
+        break;
+
+      case 'log':
+        appendLog(msg.text);
+        break;
+
+      case 'done':
+        setRunning(false);
+        showCompletion(msg.success, msg.stopped);
+        break;
+
+      case 'timing':
+        appendLog(msg.raw);
+        break;
+    }
+  }
+
+  function handleStep(msg) {
+    switch (msg.phase) {
+      case 'new_step':
+        currentStep = msg.step;
+        totalSteps = msg.total;
+        const pct = Math.round((currentStep / totalSteps) * 100);
+        progressFill.style.width = pct + '%';
+        statusMeta.textContent = `Step ${currentStep}/${totalSteps} \u00b7 ${msg.elapsed}s`;
+        break;
+
+      case 'thinking':
+        setPhase('thinking', 'Thinking...');
+        break;
+
+      case 'decided':
+        setPhase('thinking', 'Decided');
+        break;
+
+      case 'tool_call':
+        if (msg.raw) {
+          const toolMatch = msg.raw.match(/\[Tool\]\s+(\w+)\((.+)\)/);
+          if (toolMatch) {
+            const name = toolMatch[1];
+            let detail = '';
+            try {
+              const args = JSON.parse(toolMatch[2]);
+              detail = args.text || args.query || args.appName || args.url || args.destination || args.mode || '';
+            } catch {}
+            setPhase('acting', `${formatToolName(name)}${detail ? ': ' + detail : ''}`);
+          }
+        }
+        break;
+
+      case 'acting':
+        if (msg.raw) {
+          const resultMatch = msg.raw.match(/\[Tool\] → (.+?)(?:\s*\([\d.]+s\))?$/);
+          if (resultMatch) {
+            statusThought.textContent = resultMatch[1];
+          }
+        }
+        break;
+
+      case 'observing':
+        setPhase('observing', 'Capturing screen...');
+        break;
+    }
+  }
+
+  function formatToolName(name) {
+    const map = {
+      searchMaps: 'Searching Maps',
+      googleSearch: 'Searching Google',
+      openURL: 'Opening URL',
+      openApp: 'Opening app',
+      tapText: 'Tapping',
+      tap: 'Tapping',
+      inputText: 'Typing',
+      pressKey: 'Pressing key',
+      scroll: 'Scrolling',
+      setAppearance: 'Setting appearance',
+      setLocation: 'Setting location',
+      takeScreenshot: 'Capturing screen',
+      getUIElements: 'Reading UI',
+      composeMessage: 'Composing message',
+      taskComplete: 'Completing',
+    };
+    return map[name] || name;
+  }
+
+  // ─── UI Updates ───
+
+  function setRunning(isRunning) {
+    running = isRunning;
+    submitBtn.disabled = isRunning;
+    submitBtn.textContent = isRunning ? 'Running...' : 'Run';
+    stopBtn.classList.toggle('visible', isRunning);
+    statusCard.classList.toggle('visible', isRunning);
+    completionCard.classList.remove('visible');
+
+    if (isRunning) {
+      startTime = Date.now();
+      currentStep = 0;
+      totalSteps = 0;
+      progressFill.style.width = '0%';
+      logsText.textContent = '';
+      completionCard.className = 'completion-card';
+      elapsedTimer = setInterval(updateElapsed, 500);
+    } else {
+      clearInterval(elapsedTimer);
+    }
+  }
+
+  function updateElapsed() {
+    if (!running) return;
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+    if (!statusMeta.textContent.includes('Step')) {
+      statusMeta.textContent = elapsed + 's';
+    }
+  }
+
+  function setPhase(phase, label) {
+    phaseDot.className = 'phase-dot ' + phase;
+    phaseLabel.textContent = label;
+  }
+
+  function showCompletion(success, stopped) {
+    statusCard.classList.remove('visible');
+    stopBtn.classList.remove('visible');
+
+    if (stopped) {
+      completionCard.className = 'completion-card visible failure';
+      completionIcon.textContent = '\u23F9\uFE0F';
+      completionTitle.textContent = 'Stopped';
+      completionSummary.textContent = 'Agent was stopped by user.';
+      timingGrid.innerHTML = '';
+      return;
+    }
+
+    completionCard.className = 'completion-card visible ' + (success ? 'success' : 'failure');
+    completionIcon.textContent = success ? '\u2705' : '\u274C';
+    completionTitle.textContent = success ? 'Task Completed' : 'Task Failed';
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    completionSummary.textContent = `${currentStep} steps in ${elapsed}s`;
+
+    timingGrid.innerHTML = `
+      <div class="timing-item">
+        <div class="timing-label">Total</div>
+        <div class="timing-value">${elapsed}s</div>
+      </div>
+      <div class="timing-item">
+        <div class="timing-label">Steps</div>
+        <div class="timing-value">${currentStep}</div>
+      </div>
+    `;
+  }
+
+  function appendLog(text) {
+    logsText.textContent += text;
+    if (logsContent.classList.contains('open')) {
+      logsContent.scrollTop = logsContent.scrollHeight;
+    }
+  }
+
+  // ─── Actions ───
+
+  function submit() {
+    const task = taskInput.value.trim();
+    if (!task || running) return;
+
+    ws.send(JSON.stringify({
+      type: 'run',
+      task,
+      model: modelSelect.value,
+      maxSteps: 25,
+    }));
+  }
+
+  function stop() {
+    if (ws && running) {
+      ws.send(JSON.stringify({ type: 'stop' }));
+    }
+  }
+
+  // ─── Voice Input ───
+
+  let recognition = null;
+
+  function setupVoice() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      voiceBtn.style.display = 'none';
+      return;
+    }
+
+    recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+
+    recognition.onresult = (event) => {
+      let transcript = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        transcript += event.results[i][0].transcript;
+      }
+      taskInput.value = transcript;
+      autoResize();
+    };
+
+    recognition.onend = () => {
+      voiceBtn.classList.remove('listening');
+    };
+
+    recognition.onerror = () => {
+      voiceBtn.classList.remove('listening');
+    };
+  }
+
+  function toggleVoice() {
+    if (!recognition) return;
+    if (voiceBtn.classList.contains('listening')) {
+      recognition.stop();
+    } else {
+      voiceBtn.classList.add('listening');
+      recognition.start();
+    }
+  }
+
+  // ─── Auto-resize textarea ───
+
+  function autoResize() {
+    taskInput.style.height = 'auto';
+    taskInput.style.height = Math.min(taskInput.scrollHeight, 120) + 'px';
+  }
+
+  // ─── Event Listeners ───
+
+  submitBtn.addEventListener('click', submit);
+  stopBtn.addEventListener('click', stop);
+  voiceBtn.addEventListener('click', toggleVoice);
+  taskInput.addEventListener('input', autoResize);
+
+  taskInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      submit();
+    }
+  });
+
+  logsToggle.addEventListener('click', () => {
+    logsToggle.classList.toggle('open');
+    logsContent.classList.toggle('open');
+    if (logsContent.classList.contains('open')) {
+      logsContent.scrollTop = logsContent.scrollHeight;
+    }
+  });
+
+  // ─── Init ───
+  setupVoice();
+  connect();
+})();
+</script>
+
+</body>
+</html>
