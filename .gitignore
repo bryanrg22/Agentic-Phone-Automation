@@ -46,3 +46,13 @@ coverage/
 # Extra md files
 SECAGENT_STYLE_EFFICIENCY.md
 TODO.md
+
+# JDK symlink (machine-specific)
+openjdk.jdk
+
+# Xcode user data
+xcuserdata/
+
+# Runtime data (personal)
+logs/tasks.jsonl
+memories/user.md

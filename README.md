@@ -30,11 +30,11 @@ The agent follows an **observe-decide-act** loop on a physical iPhone over USB:
          │
          ▼
   ┌──────────────────────────────────────┐
-  │            MacBook                    │
+  │            MacBook                   │
   │                                      │
   │  Frontend Server ← voice command     │
   │       ↓                              │
-  │  agent.mjs ↔ GPT-5.4 / Gemini API  │
+  │  agent.mjs ↔ GPT-5.4 / Gemini API    │
   │       ↓                              │
   │  Direct HTTP (100ms/action)          │
   │       ↓                              │

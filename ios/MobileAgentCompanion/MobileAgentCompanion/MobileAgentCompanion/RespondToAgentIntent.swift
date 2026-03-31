@@ -24,7 +24,7 @@ struct RespondToAgentIntent: LiveActivityIntent {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONEncoder().encode(["choice": choice])
 
-        try? await URLSession.shared.data(for: request)
+        _ = try? await URLSession.shared.data(for: request)
         return .result()
     }
 }

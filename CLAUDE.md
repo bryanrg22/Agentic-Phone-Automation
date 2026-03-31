@@ -147,6 +147,23 @@ Vision-gated uses `getUIElements` to hash the screen state after each action. If
 - **Human-in-the-loop** — when agent calls `askUser`, Dynamic Island shows question + option buttons with yellow keyline tint. User taps a choice, `RespondToAgentIntent` sends it to `POST /respond`, agent continues
 - Completion state shows green checkmark for 4 seconds before dismissing
 
+## Memory Architecture
+
+Two memory types following the CoALA taxonomy (arXiv:2309.02427):
+
+**Semantic memory** (`memories/user.md`) — user facts, preferences, resolved ambiguities. Loaded into system prompt at startup (always available). Agent writes via `saveMemory` tool when it learns something new. Same approach as ChatGPT (bio tool + system prompt injection), Claude Code (CLAUDE.md), and OpenClaw (340k GitHub stars, uses MEMORY.md). The paper "Beyond the Context Window" (arXiv:2603.04814) validated that injection has higher accuracy than retrieval for compact memory.
+
+**Episodic memory** (`logs/tasks.jsonl`) — task history in append-only JSONL format. Each entry: timestamp, task, steps, time, success/fail, mode, model. Same format as OpenClaw's session logging. Agent reads via `recallHistory` tool. The position paper "Episodic Memory is the Missing Piece" (arXiv:2502.06975) argues this is critical for agents that learn from operational history.
+
+**Why JSONL + markdown (not a database):** For a personal agent with dozens of facts and hundreds of task logs, file-based storage is optimal — zero dependencies, crash-safe (append-only), human-readable, git-trackable. OpenClaw uses the same pattern at 340k stars. Architecture supports future migration to SQLite or vector search when memory grows large.
+
+**Key research papers:**
+- MemGPT (Berkeley, arXiv:2310.08560) — tiered memory: working memory (always in prompt) + long-term storage (retrieved on demand)
+- Beyond the Context Window (arXiv:2603.04814) — injection beats retrieval for compact memory; hybrid wins overall
+- Memory for Autonomous LLM Agents (arXiv:2603.07670) — comprehensive survey, validates hierarchical virtual context
+- Generative Agents (Stanford, arXiv:2304.03442) — memory stream with recency + relevance + importance scoring
+- CoALA (arXiv:2309.02427) — formal taxonomy: episodic, semantic, procedural memory for language agents
+
 ## Key Design Decisions
 
 - **Coordinates are percentages (0-100)**, not pixels. Survives different device sizes.

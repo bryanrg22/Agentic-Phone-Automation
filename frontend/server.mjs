@@ -121,6 +121,7 @@ async function sendPushUpdateLiveActivity(updateToken, state) {
   if (!apnsKey || !updateToken) return;
 
   const jwt = generateAPNsJWT();
+  const isAskingUser = state.waitingForInput && state.inputQuestion;
   const payload = {
     aps: {
       timestamp: Math.floor(Date.now() / 1000),
@@ -138,6 +139,9 @@ async function sendPushUpdateLiveActivity(updateToken, state) {
         inputOptions: state.inputOptions || [],
       },
       ...(state.isComplete ? { 'dismissal-date': Math.floor(Date.now() / 1000) + 8 } : {}),
+      // Auto-expand Dynamic Island when asking user for input or when task completes
+      ...(isAskingUser ? { alert: { title: 'Input Needed', body: state.inputQuestion, sound: 'default' } } : {}),
+      ...(state.isComplete ? { alert: { title: state.success ? 'Task Completed' : 'Task Failed', body: state.thought } } : {}),
     },
   };
 
@@ -214,14 +218,16 @@ function startAgent(task, model = DEFAULT_MODEL, maxSteps = 25, onUpdate = () =>
   agentProcess.stdout.on('data', (chunk) => {
     const text = chunk.toString();
     const lines = text.split('\n').filter(Boolean);
+    let stateChanged = false;
     for (const line of lines) {
-      if (line.includes('[AI] Sending to')) { agentState.phase = 'thinking'; agentState.thought = 'Thinking...'; }
+      if (line.includes('[AI] Sending to')) { agentState.phase = 'thinking'; agentState.thought = 'Thinking...'; stateChanged = true; }
       else if (line.includes('[Tool]') && line.includes('→') && !line.includes('Found')) {
         const resultMatch = line.match(/→ (.+?)(?:\s*\([\d.]+s\))?$/);
         if (resultMatch) agentState.thought = resultMatch[1];
         agentState.phase = 'acting';
+        stateChanged = true;
       }
-      else if (line.includes('[Screenshot]')) { agentState.phase = 'observing'; agentState.thought = 'Capturing screen...'; }
+      else if (line.includes('[Screenshot]')) { agentState.phase = 'observing'; agentState.thought = 'Capturing screen...'; stateChanged = true; }
       else if (line.includes('__ASK_USER__:')) {
         const askData = JSON.parse(line.split('__ASK_USER__:')[1]);
         agentState.waitingForInput = true;
@@ -229,14 +235,19 @@ function startAgent(task, model = DEFAULT_MODEL, maxSteps = 25, onUpdate = () =>
         agentState.inputOptions = askData.options;
         agentState.phase = 'waiting';
         agentState.thought = askData.question;
+        stateChanged = true;
         console.log(`[Server] Agent asking user: "${askData.question}" — options: ${askData.options.join(', ')}`);
       }
-      else if (line.includes('TASK COMPLETED')) { agentState.isComplete = true; agentState.success = true; agentState.phase = 'complete'; agentState.isActive = false; }
-      else if (line.includes('TASK FAILED')) { agentState.isComplete = true; agentState.success = false; agentState.phase = 'failed'; agentState.isActive = false; }
+      else if (line.includes('TASK COMPLETED')) { agentState.isComplete = true; agentState.success = true; agentState.phase = 'complete'; agentState.isActive = false; stateChanged = true; }
+      else if (line.includes('TASK FAILED')) { agentState.isComplete = true; agentState.success = false; agentState.phase = 'failed'; agentState.isActive = false; stateChanged = true; }
       else if (line.includes('--- Step')) {
         const match = line.match(/Step (\d+)\/(\d+).*\(([\d.]+)s total\)/);
-        if (match) { agentState.currentStep = parseInt(match[1]); agentState.totalSteps = parseInt(match[2]); agentState.elapsed = match[3]; }
+        if (match) { agentState.currentStep = parseInt(match[1]); agentState.totalSteps = parseInt(match[2]); agentState.elapsed = match[3]; stateChanged = true; }
       }
+    }
+    // Push Live Activity update via APNs whenever state changes
+    if (stateChanged && liveActivityUpdateToken) {
+      sendPushUpdateLiveActivity(liveActivityUpdateToken, agentState).catch(() => {});
     }
     onUpdate(text);
   });
@@ -244,7 +255,12 @@ function startAgent(task, model = DEFAULT_MODEL, maxSteps = 25, onUpdate = () =>
   agentProcess.stderr.on('data', (chunk) => onUpdate(chunk.toString()));
 
   agentProcess.on('exit', (code) => {
+    const wasAlreadyComplete = agentState.isComplete;
     if (!agentState.isComplete) { agentState.isActive = false; agentState.isComplete = true; agentState.success = code === 0; agentState.phase = code === 0 ? 'complete' : 'failed'; }
+    // Send final push update to end the Live Activity (only if we didn't already send one)
+    if (liveActivityUpdateToken && !wasAlreadyComplete) {
+      sendPushUpdateLiveActivity(liveActivityUpdateToken, agentState).catch(() => {});
+    }
     agentProcess = null;
   });
 

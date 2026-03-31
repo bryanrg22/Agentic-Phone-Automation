@@ -7,6 +7,7 @@ struct StopAgentIntent: LiveActivityIntent {
 
     init() {}
 
+    @MainActor
     func perform() async throws -> some IntentResult {
         // Send stop command to the server
         if let serverURL = UserDefaults.standard.string(forKey: "agentServerURL"),
@@ -14,7 +15,7 @@ struct StopAgentIntent: LiveActivityIntent {
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            try? await URLSession.shared.data(for: request)
+            _ = try? await URLSession.shared.data(for: request)
         }
 
         // End all agent Live Activities

@@ -6,7 +6,7 @@
  */
 import 'dotenv/config';
 import { exec, spawn } from 'child_process';
-import { readFileSync, writeFileSync, unlinkSync, mkdirSync, readdirSync } from 'fs';
+import { readFileSync, writeFileSync, unlinkSync, mkdirSync, readdirSync, existsSync } from 'fs';
 import { tmpdir, homedir } from 'os';
 import { join } from 'path';
 
@@ -557,9 +557,9 @@ const toolDefs = [
   { name: 'composeMessage', description: 'Open Messages to compose a new text. Optionally pre-fill body.', parameters: { type: 'object', properties: { body: { type: 'string', description: 'Message body (optional)' } } } },
   { name: 'setAppearance', description: 'Switch dark mode or light mode. Instant.', parameters: { type: 'object', properties: { mode: { type: 'string', enum: ['dark', 'light'], description: 'Appearance mode' } }, required: ['mode'] } },
   { name: 'setLocation', description: 'Set GPS location. Instant.', parameters: { type: 'object', properties: { latitude: { type: 'number' }, longitude: { type: 'number' }, name: { type: 'string', description: 'Location name' } }, required: ['latitude', 'longitude'] } },
-  { name: 'copyToClipboard', description: 'Copy text to device clipboard.', parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } },
+  ...(!isPhone ? [{ name: 'copyToClipboard', description: 'Copy text to device clipboard.', parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } }] : []),
   { name: 'openApp', description: `Open an app by name. Available: ${Object.keys(appMap).join(', ')}`, parameters: { type: 'object', properties: { appName: { type: 'string', description: 'App name' } }, required: ['appName'] } },
-  { name: 'takeScreenshot', description: 'Capture the current screen to see what is displayed. Use before tapping.', parameters: { type: 'object', properties: {} } },
+  { name: 'takeScreenshot', description: 'Capture the current screen. NOTE: screenshots are auto-captured after action tools (tap, type, etc.) so you usually do NOT need to call this separately. Only use for initial observation or to verify final task completion.', parameters: { type: 'object', properties: {} } },
   { name: 'getUIElements', description: 'Get all UI elements on screen with their text, IDs, and positions. Use this to find exact buttons/fields before tapping. More accurate than guessing coordinates from a screenshot.', parameters: { type: 'object', properties: {} } },
   { name: 'tap', description: 'Tap at screen coordinates. MUST be percentages 0-100 (NOT pixels). x=0 left edge, x=50 center, x=100 right edge. y=0 top, y=50 middle, y=100 bottom. Example: center of screen is x=50,y=50.', parameters: { type: 'object', properties: { x: { type: 'number', description: 'X percentage 0-100' }, y: { type: 'number', description: 'Y percentage 0-100' }, description: { type: 'string' } }, required: ['x', 'y'] } },
   { name: 'tapText', description: 'Tap on visible text on screen. Uses fuzzy matching.', parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } },
@@ -568,11 +568,15 @@ const toolDefs = [
   { name: 'scroll', description: 'Scroll down.', parameters: { type: 'object', properties: {} } },
   { name: 'swipe', description: 'Swipe gesture. Coordinates as percentages.', parameters: { type: 'object', properties: { startX: { type: 'number' }, startY: { type: 'number' }, endX: { type: 'number' }, endY: { type: 'number' } }, required: ['startX', 'startY', 'endX', 'endY'] } },
   { name: 'hideKeyboard', description: 'Dismiss the keyboard.', parameters: { type: 'object', properties: {} } },
+  { name: 'typeAndSubmit', description: 'Tap a text field, type text, and press enter/send — all in one step. Use this instead of separate tap + inputText + pressKey calls. Much faster for search bars, message fields, form inputs.', parameters: { type: 'object', properties: { elementText: { type: 'string', description: 'Text of the field to tap (e.g. "Search", "Message") — uses tapText' }, text: { type: 'string', description: 'Text to type' }, submitKey: { type: 'string', description: 'Key to press after typing (default: enter). Use "send" for Messages blue arrow.' } }, required: ['elementText', 'text'] } },
   ...(grounding === 'zoomclick' ? [{
     name: 'zoomAndTap',
     description: 'Zoom into a region of the screen for precise tapping. Use this instead of tap when: (1) targeting small icons, (2) multiple elements are close together, (3) you need precision. Provide the rough area to zoom into, and you will get a zoomed view to tap more precisely.',
     parameters: { type: 'object', properties: { x: { type: 'number', description: 'Rough X percentage (0-100) of the area to zoom into' }, y: { type: 'number', description: 'Rough Y percentage (0-100) of the area to zoom into' }, description: { type: 'string', description: 'What you are trying to tap' } }, required: ['x', 'y', 'description'] }
   }] : []),
+  { name: 'saveMemory', description: 'Save a fact about the user to persistent memory. Use when you learn: user preferences, which contact they mean, their address, habits, or any reusable personal info. Also save after askUser resolves ambiguity so you do not ask again next time.', parameters: { type: 'object', properties: { fact: { type: 'string', description: 'The fact to remember (e.g. "Kenny = Kenny Frias", "Home address: 123 Main St")' } }, required: ['fact'] } },
+  { name: 'recallMemory', description: 'Read all saved memory. Use at the start of tasks involving personal info if you need to check what you know.', parameters: { type: 'object', properties: {} } },
+  { name: 'recallHistory', description: 'Read past task history. Use when the user asks about previous tasks, what you did earlier, or wants to repeat a past action.', parameters: { type: 'object', properties: {} } },
   { name: 'askUser', description: 'Ask the user a question when you need confirmation or clarification. Use ONLY when: multiple contacts/results match, about to send a message/email/call, about to delete data, about to make a purchase, or genuinely uncertain. Do NOT use for routine actions like tapping, scrolling, or opening apps.', parameters: { type: 'object', properties: { question: { type: 'string', description: 'The question to ask the user' }, options: { type: 'array', items: { type: 'string' }, description: 'List of options for the user to choose from (2-4 options)' } }, required: ['question', 'options'] } },
   { name: 'taskComplete', description: 'Task is done. Call when verified complete.', parameters: { type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'] } },
   { name: 'taskFailed', description: 'Task cannot be completed.', parameters: { type: 'object', properties: { reason: { type: 'string' } }, required: ['reason'] } },
@@ -825,6 +829,37 @@ async function executeTool(name, args) {
       }
       return 'Keyboard hidden';
     }
+    case 'typeAndSubmit': {
+      // Compound tool: tap field + type + submit in one call
+      // Step 1: Tap the text field
+      try {
+        await executeTool('tapText', { text: args.elementText });
+      } catch {
+        // Fallback: try tapping by coordinates if text tap fails
+      }
+      await sleep(500);
+      // Step 2: Type the text
+      await executeTool('inputText', { text: args.text });
+      await sleep(300);
+      // Step 3: Submit
+      const key = args.submitKey || 'enter';
+      if (key === 'send') {
+        // iOS Messages: tap the blue send arrow
+        const screenW = isPhone ? phoneScreenWidth : 402;
+        const screenH = isPhone ? phoneScreenHeight : 874;
+        const sendX = Math.round(screenW * 0.92);
+        const sendY = Math.round(screenH * 0.74);
+        if (isPhone && maestro.touchPoint) {
+          await maestro.touchPoint(sendX, sendY);
+        } else {
+          const header = currentAppId ? `appId: ${currentAppId}\n---\n` : 'appId: any\n---\n';
+          await maestro.runFlow(`${header}- tapOn:\n    point: "92%, 74%"`);
+        }
+      } else {
+        await executeTool('pressKey', { key });
+      }
+      return `Typed "${args.text}" into "${args.elementText}" and pressed ${key}`;
+    }
     case 'zoomAndTap': {
       // ZoomClick: crop around rough area, send zoomed image to AI for precise targeting
       // Step 1: Get current screenshot
@@ -879,6 +914,36 @@ async function executeTool(name, args) {
       return `Tapped "${args.description}" at rough (${args.x}%, ${args.y}%) [zoom refinement failed]`;
     }
 
+    // === MEMORY ===
+    case 'saveMemory': {
+      // Defer actual write to after task completion — just queue it
+      pendingMemories.push(args.fact);
+      console.log(`[Memory] Queued: "${args.fact}" (will save after task completes)`);
+      return `Will remember: "${args.fact}"`;
+    }
+    case 'recallMemory': {
+      const memFile = join(import.meta.dirname || '.', 'memories', 'user.md');
+      if (existsSync(memFile)) {
+        const content = readFileSync(memFile, 'utf-8');
+        console.log(`[Memory] Recalled ${content.split('\n').length - 1} facts`);
+        return content || '(no memories saved yet)';
+      }
+      return '(no memories saved yet)';
+    }
+    case 'recallHistory': {
+      const logFile = join(import.meta.dirname || '.', 'logs', 'tasks.jsonl');
+      if (existsSync(logFile)) {
+        const lines = readFileSync(logFile, 'utf-8').trim().split('\n');
+        const recent = lines.slice(-10).map(l => {
+          const e = JSON.parse(l);
+          return `[${e.timestamp.split('T')[0]}] "${e.task}" — ${e.success ? 'completed' : 'failed'} in ${e.steps} steps (${e.time}s)`;
+        }).join('\n');
+        console.log(`[History] Recalled ${lines.length} tasks`);
+        return `Recent task history:\n${recent}`;
+      }
+      return '(no task history yet)';
+    }
+
     // === HUMAN-IN-THE-LOOP ===
     case 'askUser': {
       console.log(`[askUser] "${args.question}" — options: ${args.options.join(', ')}`);
@@ -930,40 +995,74 @@ async function callLLM(messages) {
   return await resp.json();
 }
 
+// ─── Load persistent memory ───
+const memDir = join(import.meta.dirname || '.', 'memories');
+let memoryContext = '';
+try {
+  const memFile = join(memDir, 'user.md');
+  if (existsSync(memFile)) {
+    const content = readFileSync(memFile, 'utf-8').trim();
+    if (content && content !== '# User Memory') {
+      memoryContext = content;
+      console.log(`[Memory] Loaded ${content.split('\n').length - 1} facts`);
+    }
+  }
+} catch {}
+
 // ─── System prompt ───
-const systemPrompt = `You are an AI agent controlling an iPhone running iOS. You see real iOS screenshots and interact with native iOS apps. You understand iOS UI patterns: navigation bars at top, tab bars at bottom, swipe gestures, modal sheets, the status bar, the home indicator, and standard Apple app layouts. Complete the user's task.
+const systemPrompt = `<SYSTEM_CAPABILITY>
+* You are an AI agent controlling an iPhone 15 Pro running iOS 26 (latest, with Liquid Glass design).
+* You see real iOS screenshots and interact with native iOS apps via tool calls.
+* You understand iOS UI patterns: translucent navigation bars at top, tab bars at bottom, swipe gestures, modal sheets, the status bar, the home indicator, and standard Apple app layouts.
+* Coordinates are PERCENTAGES (0-100), NOT pixels. x=0 is left edge, x=100 is right edge, y=0 is top, y=100 is bottom.
+* After EVERY action, take a screenshot to verify it worked before moving on. If it didn't work, try a different approach.
+* ALWAYS chain multiple tool calls in a single response when they are independent. For example: openApp + takeScreenshot, saveMemory + tapText, tapText + inputText. Do NOT make one tool call per response when you can batch them. This is critical for speed.
+* The current date is ${new Date().toLocaleDateString()}.
+</SYSTEM_CAPABILITY>
 
-AVAILABLE APPS:
+${memoryContext ? `<USER_MEMORY>
+${memoryContext}
+Use these facts when relevant. Save new facts with saveMemory.
+</USER_MEMORY>
+
+` : ''}<AVAILABLE_APPS>
 ${appListStr}
+</AVAILABLE_APPS>
 
-STRATEGY:
-${isPhone ? `1. Use openApp to launch the right app for the task, then use takeScreenshot to see the screen.
-2. Navigate the app UI by using takeScreenshot to see the screen, then tapText or tap to interact.
-3. Prefer tapText over tap (coordinates) — it is more reliable.
-4. After completing actions: takeScreenshot to verify, then taskComplete.
+<STRATEGY>
+${isPhone ? `1. Use openApp to launch the right app for the task, then takeScreenshot to see the screen.
+2. Use getUIElements to discover exact button/element text, then tapText with exact text.
+3. Prefer tapText over tap (coordinates) — tapText is more reliable.
+4. After completing actions: takeScreenshot to VERIFY the task is actually done, then taskComplete.
 NOTE: This is a PHYSICAL iPhone. Deep link shortcuts (searchMaps, googleSearch, openURL) will open the app but you must then navigate the UI manually.`
 : `1. Use INSTANT tools when possible: searchMaps, googleSearch, openURL, getDirections, composeMessage, setAppearance, setLocation. These complete in one step.
-2. For app UI interaction: ALWAYS call getUIElements FIRST to see all buttons/fields on screen with their exact accessibility text. Then use tapText with the exact accessibilityText value. This is far more reliable than guessing from screenshots.
-3. Use takeScreenshot only when you need to visually verify the result or understand the visual layout.
-4. Only use tap (coordinates) as an absolute last resort. Prefer tapText with text from getUIElements.
+2. For app UI interaction: ALWAYS call getUIElements FIRST to see all buttons/fields with their exact accessibility text. Then use tapText with the exact text.
+3. Use takeScreenshot only when you need to visually verify the result.
+4. Only use tap (coordinates) as an absolute last resort.
 5. After instant tools or completing actions: takeScreenshot to verify, then taskComplete.`}
+</STRATEGY>
 
-RULES:
+<IMPORTANT>
+* iOS Messages: the SEND button is a BLUE UP-ARROW circle INSIDE the text input bar on the far right, at approximately x=92, y=74. Do NOT tap the "=A" text formatting button below the text field. To message a specific contact, find their existing conversation first — do NOT tap "New Message" unless they have no existing thread.
+* iOS Photos: the MOST RECENT photo/image is at the BOTTOM-RIGHT of the grid. Scroll DOWN first if needed.
+* iOS Maps: the search bar is at the BOTTOM of the screen, not the top.
+* If the same action fails 2 times with no change, your coordinates are WRONG. Try: getUIElements to find exact element text, tapText instead of tap, scroll to reveal hidden elements, or a completely different approach.
+</IMPORTANT>
+
+<RULES>
 ${isPhone ? '- Use openApp to launch apps, then navigate UI with tap/tapText/inputText' : '- Prefer instant tools over tapping'}
 - Prefer tapText over tap (coordinates). tapText uses exact text matching and is more reliable.
-- Use getUIElements to discover what buttons/elements exist before tapping
-- After inputText, press enter or tap submit to confirm
-- BEFORE calling taskComplete, you MUST takeScreenshot and verify the task is actually done on screen
-- If the same action fails 2 times, try a DIFFERENT approach (different element, different tool)
-- tap coordinates are PERCENTAGES 0-100, NOT pixels. Bottom-right is x=95,y=95 not x=900,y=900
-- CRITICAL — askUser RULES: You MUST call askUser before: sending any message/email/call, deleting anything, making purchases, OR when multiple people/results match and you need to pick one. NEVER guess which contact — always ask. NEVER send a message without confirming the recipient. Keep options to 2-4 choices.
-- iOS Photos app: the MOST RECENT photo/image is at the BOTTOM-RIGHT of the grid, NOT the top-left. Scroll down first if needed.
-- iOS Maps app: the search bar is at the BOTTOM of the screen, not the top.${grounding === 'grid' ? `
-- GRID OVERLAY: The screenshot has yellow grid lines at every 10% with labels at 20%, 40%, 60%, 80%. Use these to estimate tap coordinates accurately. The numbers along the top show X percentages, numbers along the left show Y percentages.` : ''}${grounding === 'zoomclick' ? `
-- ZOOM TAP: When you need to tap a SMALL icon, button, or when multiple elements are close together, use zoomAndTap instead of tap. It will show you a zoomed-in view for precise targeting. Use regular tap for large, obvious targets.` : ''}${agentMode === 'vision-gated' ? `
+- Use getUIElements to discover what buttons/elements exist before tapping.
+- BEFORE calling taskComplete, you MUST takeScreenshot and verify the task is actually done on screen.
+- CRITICAL — askUser RULES: You MUST call askUser before: sending any message/email/call, deleting anything, making purchases, OR when multiple people/results match and you need to pick one. NEVER guess which contact — always ask. NEVER send a message without confirming the recipient. EXCEPTION: if memory already tells you which contact the user means, you may skip askUser. Keep options to 2-3 choices.
+- MEMORY: When you learn something new about the user (preferred contact, address, preference), call saveMemory to persist it. After askUser resolves ambiguity, ALWAYS saveMemory with the result so you never ask the same question twice.${grounding === 'grid' ? `
+- GRID OVERLAY: The screenshot has yellow grid lines at every 10% with labels at 20%, 40%, 60%, 80%. Use these to estimate tap coordinates accurately.` : ''}${grounding === 'zoomclick' ? `
+- ZOOM TAP: When you need to tap a SMALL icon or when elements are close together, use zoomAndTap instead of tap for precise targeting.` : ''}
+</RULES>${agentMode === 'vision-gated' ? `
 
-VISION GATE MODE:
-Screenshots are only allowed when the screen content changes (detected via UI hierarchy hashing), on step 1, after errors, when stuck, or every ${visionEveryK} steps as a safety fallback. If your takeScreenshot call is denied, you will get a text message instead. The current screen elements are always provided as text context. Use getUIElements for additional detail. Save takeScreenshot for verifying task completion.` : ''}`;
+<VISION_GATE>
+Screenshots are only allowed when the screen content changes (detected via UI hierarchy hashing), on step 1, after errors, when stuck, or every ${visionEveryK} steps as a safety fallback. If your takeScreenshot call is denied, use getUIElements instead. Save takeScreenshot for verifying task completion.
+</VISION_GATE>` : ''}`;
 
 // ─── Hierarchy helpers (for hash-based vision gate) ───
 const hierarchyNoise = ['scroll bar', 'battery', 'Cellular', 'Wi-Fi bars', 'PM', 'AM', 'No signal', 'Not charging', 'signal strength', 'battery power', 'location services', 'Location tracking'];
@@ -1021,6 +1120,7 @@ console.log(`${'='.repeat(50)}\n`);
 const stepLog = [];
 const recentActions = [];
 const rollingSummary = [];
+const pendingMemories = [];
 let visionSteps = 0;
 let gatedSteps = 0;
 let prevScreenHash = null;
@@ -1147,6 +1247,12 @@ for (let step = 1; step <= maxSteps; step++) {
           } else {
             console.log(`[Tool] → ${result} (${execTime}s)`);
           }
+          // Auto-capture: action tools automatically trigger a screenshot
+          const actionTools = ['openApp', 'tap', 'tapText', 'inputText', 'pressKey', 'scroll', 'swipe', 'typeAndSubmit', 'hideKeyboard'];
+          if (actionTools.includes(toolName) && !needsScreenshot) {
+            needsScreenshot = true;
+            console.log(`[Auto-capture] Screenshot queued after ${toolName}`);
+          }
         }
       } catch (e) {
         result = `Error: ${e.message}`;
@@ -1192,6 +1298,29 @@ for (let step = 1; step <= maxSteps; step++) {
         console.log(`  Vision rate:   ${visionSteps + gatedSteps > 0 ? ((visionSteps / (visionSteps + gatedSteps)) * 100).toFixed(0) : 0}%`);
       }
       console.log(`${'='.repeat(50)}`);
+      // Log task to history
+      try {
+        const logDir = join(import.meta.dirname || '.', 'logs');
+        mkdirSync(logDir, { recursive: true });
+        const logEntry = JSON.stringify({ timestamp: new Date().toISOString(), task, summary: doneMsg, steps: step, time: totalTime, success: true, mode: agentMode, grounding, model: modelName, provider }) + '\n';
+        const logFile = join(logDir, 'tasks.jsonl');
+        const existing = existsSync(logFile) ? readFileSync(logFile, 'utf-8') : '';
+        writeFileSync(logFile, existing + logEntry);
+        console.log(`[History] Task logged`);
+      } catch {}
+      // Flush pending memories to disk
+      if (pendingMemories.length > 0) {
+        try {
+          const memDir = join(import.meta.dirname || '.', 'memories');
+          const memFile = join(memDir, 'user.md');
+          mkdirSync(memDir, { recursive: true });
+          const timestamp = new Date().toISOString().split('T')[0];
+          const existing = existsSync(memFile) ? readFileSync(memFile, 'utf-8') : '# User Memory\n';
+          const newEntries = pendingMemories.map(f => `- [${timestamp}] ${f}`).join('\n');
+          writeFileSync(memFile, existing + newEntries + '\n');
+          console.log(`[Memory] Saved ${pendingMemories.length} facts to disk`);
+        } catch {}
+      }
       process.exit(0);
     }
 
@@ -1201,6 +1330,16 @@ for (let step = 1; step <= maxSteps; step++) {
       console.log(`  ❌ TASK FAILED (${totalTime}s)`);
       console.log(`  ${doneMsg}`);
       console.log(`${'='.repeat(50)}`);
+      // Log failed task to history
+      try {
+        const logDir = join(import.meta.dirname || '.', 'logs');
+        mkdirSync(logDir, { recursive: true });
+        const logEntry = JSON.stringify({ timestamp: new Date().toISOString(), task, reason: doneMsg, steps: step, time: totalTime, success: false, mode: agentMode, grounding, model: modelName, provider }) + '\n';
+        const logFile = join(logDir, 'tasks.jsonl');
+        const existing = existsSync(logFile) ? readFileSync(logFile, 'utf-8') : '';
+        writeFileSync(logFile, existing + logEntry);
+        console.log(`[History] Task logged`);
+      } catch {}
       process.exit(1);
     }
 
