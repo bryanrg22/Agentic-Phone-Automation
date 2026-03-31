@@ -46,6 +46,7 @@ coverage/
 # Extra md files
 SECAGENT_STYLE_EFFICIENCY.md
 TODO.md
+git-incident-*.md
 
 # JDK symlink (machine-specific)
 openjdk.jdk

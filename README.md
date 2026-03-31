@@ -58,6 +58,13 @@ Each step: **Screenshot (162ms) → AI decides (1-3s) → Execute action (100ms)
 ## 🎯 Key Features
 
 <p align="center">
+  <img src="public/holding-action-button.jpg" alt="Holding the Action Button — speaking a command" width="280"/>
+</p>
+<p align="center">
+  <em>Hold the Action Button and speak your command — the shortcut captures your voice and sends it to the agent.</em>
+</p>
+
+<p align="center">
   <img src="public/dynamic-island.jpg" alt="Dynamic Island — agent thinking and processing" width="380"/>
   &nbsp;&nbsp;&nbsp;
   <img src="public/HITL.jpg" alt="Human-in-the-loop — agent asks before sending" width="380"/>
@@ -218,6 +225,23 @@ brew install openjdk
    ```
    - On first run: go to Settings → General → VPN & Device Management → **Verify** the developer app
    - The bridge builds the XCTest runner (~1-2 min first time), then stays running
+
+5. **Set up the Action Button shortcut** (enables voice-triggered tasks):
+
+   Install the shortcut directly: **[Mobile Agent Shortcut](https://www.icloud.com/shortcuts/9dad98f830af44118ee0d20e4503235e)** — open this link on your iPhone (or Mac, it syncs) and tap **Add Shortcut**.
+
+   Then assign it to your Action Button:
+
+   <p align="center">
+     <img src="public/iphone-actionbutton-shortcut.png" alt="Action Button set to Mobile Agent shortcut" width="220"/>
+     &nbsp;&nbsp;&nbsp;&nbsp;
+     <img src="public/shortcut-setup.jpg" alt="Shortcut setup — Dictate Text then POST to server" width="220"/>
+   </p>
+   <p align="center">
+     <em>Left: Settings → Action Button → Shortcut → select "Mobile Agent". Right: The shortcut dictates your voice, then sends it as a POST request to your Mac's frontend server.</em>
+   </p>
+
+   **What the shortcut does:** Dictate Text → POST the transcription as JSON to `http://<your-mac>.local:8000/task`. Replace `Bryans-MacBook-Pro.local` with your Mac's hostname (System Settings → General → Sharing → Local Hostname). Your iPhone and Mac must be on the same Wi-Fi network.
 
 ### Running on Physical iPhone
 
