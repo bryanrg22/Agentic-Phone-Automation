@@ -55,6 +55,7 @@ openjdk.jdk
 xcuserdata/
 **/xcuserdata/
 *.xcuserstate
+**/xcshareddata/
 
 # Runtime data (personal)
 logs/tasks.jsonl
