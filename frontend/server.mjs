@@ -362,9 +362,96 @@ const httpServer = createServer((req, res) => {
   }
 
   // CORS preflight
-  if ((req.url === '/task' || req.url === '/stop' || req.url === '/respond' || req.url === '/register-push-token') && req.method === 'OPTIONS') {
-    res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST', 'Access-Control-Allow-Headers': 'Content-Type' });
+  if ((req.url === '/task' || req.url === '/stop' || req.url === '/respond' || req.url === '/register-push-token' || req.url === '/memories' || req.url === '/memories/delete' || req.url === '/memories/edit') && req.method === 'OPTIONS') {
+    res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST,GET,DELETE', 'Access-Control-Allow-Headers': 'Content-Type' });
     res.end();
+    return;
+  }
+
+  // GET /memories — return parsed memory facts
+  if (req.url === '/memories' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    const memFile = join(__dirname, '..', 'memories', 'user.md');
+    if (existsSync(memFile)) {
+      const content = readFileSync(memFile, 'utf-8');
+      const lines = content.split('\n').filter(l => l.startsWith('- '));
+      const memories = lines.map((line, i) => {
+        const dateMatch = line.match(/^\- \[(\d{4}-\d{2}-\d{2})\] (.+)$/);
+        if (dateMatch) {
+          return { id: i, date: dateMatch[1], fact: dateMatch[2] };
+        }
+        return { id: i, date: null, fact: line.replace(/^- /, '') };
+      });
+      res.end(JSON.stringify(memories));
+    } else {
+      res.end(JSON.stringify([]));
+    }
+    return;
+  }
+
+  // POST /memories/delete — delete a memory by its fact text
+  if (req.url === '/memories/delete' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const { fact } = JSON.parse(body);
+        const memFile = join(__dirname, '..', 'memories', 'user.md');
+        if (existsSync(memFile)) {
+          const content = readFileSync(memFile, 'utf-8');
+          const lines = content.split('\n');
+          const filtered = lines.filter(l => !l.includes(fact));
+          writeFileSync(memFile, filtered.join('\n'));
+          console.log(`[Memory] Deleted: "${fact.slice(0, 50)}..."`);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // POST /memories/edit — edit a memory (old fact → new fact)
+  if (req.url === '/memories/edit' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const { oldFact, newFact } = JSON.parse(body);
+        const memFile = join(__dirname, '..', 'memories', 'user.md');
+        if (existsSync(memFile)) {
+          let content = readFileSync(memFile, 'utf-8');
+          content = content.replace(oldFact, newFact);
+          writeFileSync(memFile, content);
+          console.log(`[Memory] Edited: "${oldFact.slice(0, 30)}..." → "${newFact.slice(0, 30)}..."`);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // GET /history — return task history from JSONL log
+  if (req.url === '/history') {
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+    });
+    const logFile = join(__dirname, '..', 'logs', 'tasks.jsonl');
+    if (existsSync(logFile)) {
+      const lines = readFileSync(logFile, 'utf-8').trim().split('\n').filter(Boolean);
+      const tasks = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+      res.end(JSON.stringify(tasks));
+    } else {
+      res.end(JSON.stringify([]));
+    }
     return;
   }
 

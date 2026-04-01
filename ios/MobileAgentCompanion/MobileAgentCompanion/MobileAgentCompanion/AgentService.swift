@@ -12,6 +12,117 @@ class AgentService {
     }
     var isPolling: Bool = false
     var currentState: AgentStatusResponse?
+    var taskHistory: [TaskHistoryEntry] = [] {
+        didSet { cacheHistory() }
+    }
+
+    struct TaskHistoryEntry: Codable, Identifiable, Equatable {
+        let timestamp: String
+        let task: String
+        let summary: String?
+        let steps: Int
+        let time: String
+        let success: Bool
+        let mode: String?
+        let model: String?
+        let provider: String?
+
+        var id: String { timestamp + task }
+
+        var date: Date? {
+            let f = ISO8601DateFormatter()
+            f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return f.date(from: timestamp) ?? ISO8601DateFormatter().date(from: timestamp)
+        }
+
+        static func == (lhs: TaskHistoryEntry, rhs: TaskHistoryEntry) -> Bool {
+            lhs.id == rhs.id
+        }
+    }
+
+    // MARK: - Memories
+
+    var memories: [MemoryEntry] = [] {
+        didSet { cacheMemories() }
+    }
+
+    struct MemoryEntry: Codable, Identifiable, Equatable {
+        let id: Int
+        let date: String?
+        let fact: String
+    }
+
+    func loadCachedMemories() {
+        guard let data = UserDefaults.standard.data(forKey: "cachedMemories"),
+              let entries = try? JSONDecoder().decode([MemoryEntry].self, from: data) else { return }
+        memories = entries
+    }
+
+    private func cacheMemories() {
+        guard let data = try? JSONEncoder().encode(memories) else { return }
+        UserDefaults.standard.set(data, forKey: "cachedMemories")
+    }
+
+    func fetchMemories() async {
+        guard let url = URL(string: "\(serverURL)/memories") else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let remote = try JSONDecoder().decode([MemoryEntry].self, from: data)
+            await MainActor.run {
+                self.memories = remote
+                print("[Memories] Synced \(remote.count) facts")
+            }
+        } catch {
+            print("[Memories] Fetch failed (showing cached): \(error.localizedDescription)")
+        }
+    }
+
+    func deleteMemory(_ entry: MemoryEntry) async {
+        guard let url = URL(string: "\(serverURL)/memories/delete") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONEncoder().encode(["fact": entry.fact])
+        do {
+            let (_, _) = try await URLSession.shared.data(for: request)
+            await MainActor.run {
+                self.memories.removeAll { $0.fact == entry.fact }
+            }
+            print("[Memories] Deleted: \(entry.fact.prefix(40))...")
+        } catch {
+            print("[Memories] Delete failed: \(error.localizedDescription)")
+        }
+    }
+
+    func editMemory(_ entry: MemoryEntry, newFact: String) async {
+        guard let url = URL(string: "\(serverURL)/memories/edit") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONEncoder().encode(["oldFact": entry.fact, "newFact": newFact])
+        do {
+            let (_, _) = try await URLSession.shared.data(for: request)
+            await fetchMemories() // Refresh from server
+            print("[Memories] Edited: \(entry.fact.prefix(30))... → \(newFact.prefix(30))...")
+        } catch {
+            print("[Memories] Edit failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - History Cache
+
+    /// Load cached history from UserDefaults on init
+    func loadCachedHistory() {
+        guard let data = UserDefaults.standard.data(forKey: "cachedTaskHistory"),
+              let entries = try? JSONDecoder().decode([TaskHistoryEntry].self, from: data) else { return }
+        taskHistory = entries
+    }
+
+    /// Save history to UserDefaults
+    private func cacheHistory() {
+        guard let data = try? JSONEncoder().encode(taskHistory) else { return }
+        UserDefaults.standard.set(data, forKey: "cachedTaskHistory")
+    }
 
     private var pollingTask: Task<Void, Never>?
     private var currentActivity: Activity<AgentActivityAttributes>?
@@ -114,6 +225,26 @@ class AgentService {
             }
         } catch {
             print("[Token] Failed to register \(type): \(error.localizedDescription)")
+        }
+    }
+
+    func fetchHistory() async {
+        guard let url = URL(string: "\(serverURL)/history") else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let remoteEntries = try JSONDecoder().decode([TaskHistoryEntry].self, from: data)
+            await MainActor.run {
+                // Merge: remote is source of truth, deduplicate by id
+                let existingIds = Set(self.taskHistory.map(\.id))
+                let newEntries = remoteEntries.filter { !existingIds.contains($0.id) }
+                if !newEntries.isEmpty || remoteEntries.count != self.taskHistory.count {
+                    self.taskHistory = remoteEntries.reversed() // newest first
+                    print("[History] Synced \(remoteEntries.count) tasks (\(newEntries.count) new)")
+                }
+            }
+        } catch {
+            print("[History] Fetch failed (showing cached): \(error.localizedDescription)")
+            // Cached history stays visible — no action needed
         }
     }
 

@@ -53,6 +53,8 @@ openjdk.jdk
 
 # Xcode user data
 xcuserdata/
+**/xcuserdata/
+*.xcuserstate
 
 # Runtime data (personal)
 logs/tasks.jsonl

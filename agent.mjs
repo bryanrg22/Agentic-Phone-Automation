@@ -568,7 +568,7 @@ const toolDefs = [
   { name: 'scroll', description: 'Scroll down.', parameters: { type: 'object', properties: {} } },
   { name: 'swipe', description: 'Swipe gesture. Coordinates as percentages.', parameters: { type: 'object', properties: { startX: { type: 'number' }, startY: { type: 'number' }, endX: { type: 'number' }, endY: { type: 'number' } }, required: ['startX', 'startY', 'endX', 'endY'] } },
   { name: 'hideKeyboard', description: 'Dismiss the keyboard.', parameters: { type: 'object', properties: {} } },
-  { name: 'typeAndSubmit', description: 'Tap a text field, type text, and press enter/send — all in one step. Use this instead of separate tap + inputText + pressKey calls. Much faster for search bars, message fields, form inputs.', parameters: { type: 'object', properties: { elementText: { type: 'string', description: 'Text of the field to tap (e.g. "Search", "Message") — uses tapText' }, text: { type: 'string', description: 'Text to type' }, submitKey: { type: 'string', description: 'Key to press after typing (default: enter). Use "send" for Messages blue arrow.' } }, required: ['elementText', 'text'] } },
+  { name: 'typeAndSubmit', description: 'Tap a text field, type text, and press enter/send — all in one step. Use this instead of separate tap + inputText + pressKey calls. Much faster for search bars, message fields, form inputs. This tool HANDLES SENDING — do NOT tap the send button after calling this. Instead, take a screenshot to verify the message was sent.', parameters: { type: 'object', properties: { elementText: { type: 'string', description: 'Text of the field to tap (e.g. "Search", "Message") — uses tapText' }, text: { type: 'string', description: 'Text to type' }, submitKey: { type: 'string', description: 'Key to press after typing (default: enter). Use "send" for Messages blue arrow.' } }, required: ['elementText', 'text'] } },
   ...(grounding === 'zoomclick' ? [{
     name: 'zoomAndTap',
     description: 'Zoom into a region of the screen for precise tapping. Use this instead of tap when: (1) targeting small icons, (2) multiple elements are close together, (3) you need precision. Provide the rough area to zoom into, and you will get a zoomed view to tap more precisely.',
@@ -577,6 +577,7 @@ const toolDefs = [
   { name: 'saveMemory', description: 'Save a fact about the user to persistent memory. Use when you learn: user preferences, which contact they mean, their address, habits, or any reusable personal info. Also save after askUser resolves ambiguity so you do not ask again next time.', parameters: { type: 'object', properties: { fact: { type: 'string', description: 'The fact to remember (e.g. "Kenny = Kenny Frias", "Home address: 123 Main St")' } }, required: ['fact'] } },
   { name: 'recallMemory', description: 'Read all saved memory. Use at the start of tasks involving personal info if you need to check what you know.', parameters: { type: 'object', properties: {} } },
   { name: 'recallHistory', description: 'Read past task history. Use when the user asks about previous tasks, what you did earlier, or wants to repeat a past action.', parameters: { type: 'object', properties: {} } },
+  { name: 'webSearch', description: 'Search the web for information. Use when you encounter an unfamiliar app, game, or interface and need to understand how it works before interacting. Also useful for looking up facts, instructions, or context the user might expect you to know.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'Search query (e.g. "how to play LinkedIn Pinpoint game")' } }, required: ['query'] } },
   { name: 'askUser', description: 'Ask the user a question when you need confirmation or clarification. Use ONLY when: multiple contacts/results match, about to send a message/email/call, about to delete data, about to make a purchase, or genuinely uncertain. Do NOT use for routine actions like tapping, scrolling, or opening apps.', parameters: { type: 'object', properties: { question: { type: 'string', description: 'The question to ask the user' }, options: { type: 'array', items: { type: 'string' }, description: 'List of options for the user to choose from (2-4 options)' } }, required: ['question', 'options'] } },
   { name: 'taskComplete', description: 'Task is done. Call when verified complete.', parameters: { type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'] } },
   { name: 'taskFailed', description: 'Task cannot be completed.', parameters: { type: 'object', properties: { reason: { type: 'string' } }, required: ['reason'] } },
@@ -675,6 +676,8 @@ async function executeTool(name, args) {
       const text = result.text || '';
       const noise = ['scroll bar', 'battery', 'Cellular', 'Wi-Fi bars', 'PM', 'AM', 'No signal', 'Not charging', 'signal strength', 'battery power', 'location services', 'Location tracking'];
       const found = [];
+      const screenW = isPhone ? phoneScreenWidth : 402;
+      const screenH = isPhone ? phoneScreenHeight : 874;
 
       // Try JSON format first (direct HTTP viewHierarchy returns nested JSON)
       try {
@@ -684,8 +687,15 @@ async function executeTool(name, args) {
           if (node.label && node.label.trim()) {
             const label = node.label.trim();
             if (!noise.some(n => label.includes(n))) {
-              const entry = `- "${label}"`;
-              if (!found.includes(entry)) found.push(entry);
+              let entry;
+              if (node.frame) {
+                const pctX = Math.round((node.frame.X + node.frame.Width / 2) / screenW * 100);
+                const pctY = Math.round((node.frame.Y + node.frame.Height / 2) / screenH * 100);
+                entry = `- "${label}" at (${pctX}%, ${pctY}%)`;
+              } else {
+                entry = `- "${label}"`;
+              }
+              if (!found.some(f => f.startsWith(`- "${label}"`))) found.push(entry);
             }
           }
           if (node.children) node.children.forEach(collectLabels);
@@ -693,15 +703,26 @@ async function executeTool(name, args) {
         collectLabels(json?.axElement || json);
       } catch {
         // Fall back to CSV/regex format (MCP style)
-        for (const m of text.matchAll(/accessibilityText[="] *:? *"?([^";,\n]+)/g)) {
-          const label = m[1].trim();
+        const boundsRegex = /\[(\d+),(\d+)\]\[(\d+),(\d+)\]/;
+        for (const line of text.split('\n')) {
+          const labelMatch = line.match(/accessibilityText[="] *:? *"?([^";,\n]+)/);
+          if (!labelMatch) continue;
+          const label = labelMatch[1].trim();
           if (!label) continue;
           if (noise.some(n => label.includes(n))) continue;
-          const entry = `- "${label}"`;
-          if (!found.includes(entry)) found.push(entry);
+          const bm = line.match(boundsRegex);
+          let entry;
+          if (bm) {
+            const pctX = Math.round(((parseInt(bm[1]) + parseInt(bm[3])) / 2) / screenW * 100);
+            const pctY = Math.round(((parseInt(bm[2]) + parseInt(bm[4])) / 2) / screenH * 100);
+            entry = `- "${label}" at (${pctX}%, ${pctY}%)`;
+          } else {
+            entry = `- "${label}"`;
+          }
+          if (!found.some(f => f.startsWith(`- "${label}"`))) found.push(entry);
         }
       }
-      return `Tappable elements on screen:\n${found.join('\n')}\n\nUse tapText("exact text from above") to tap. Use inputText after tapping a text field.`;
+      return `Tappable elements on screen:\n${found.join('\n')}\n\nUse tap(x, y) with the coordinates above for precise tapping, or tapText("exact text") to tap by label.`;
     }
 
     // === INTERACTION TOOLS ===
@@ -779,9 +800,8 @@ async function executeTool(name, args) {
         }
       } catch {}
 
-      // Fallback: Maestro's text tap (slow but reliable)
-      await maestro.tap(args.text);
-      return `Tapped "${args.text}" (fallback)`;
+      // Element not in hierarchy — return immediately so AI can try a different approach
+      return `ERROR: Element "${args.text}" not found in view hierarchy. Use getUIElements to see available elements, or use tap with coordinates instead.`;
     }
     case 'inputText': {
       await maestro.inputText(args.text);
@@ -844,21 +864,57 @@ async function executeTool(name, args) {
       // Step 3: Submit
       const key = args.submitKey || 'enter';
       if (key === 'send') {
-        // iOS Messages: tap the blue send arrow
-        const screenW = isPhone ? phoneScreenWidth : 402;
-        const screenH = isPhone ? phoneScreenHeight : 874;
-        const sendX = Math.round(screenW * 0.92);
-        const sendY = Math.round(screenH * 0.74);
-        if (isPhone && maestro.touchPoint) {
-          await maestro.touchPoint(sendX, sendY);
-        } else {
-          const header = currentAppId ? `appId: ${currentAppId}\n---\n` : 'appId: any\n---\n';
-          await maestro.runFlow(`${header}- tapOn:\n    point: "92%, 74%"`);
+        // iOS Messages: find the send button via hierarchy (position changes when keyboard is open)
+        let sendTapped = false;
+        try {
+          const hier = await maestro.viewHierarchy();
+          const hText = hier.text || '';
+          const screenW = isPhone ? phoneScreenWidth : 402;
+          const screenH = isPhone ? phoneScreenHeight : 874;
+          // Search hierarchy for send button (label varies: "Send", "sendButton", arrow icon)
+          try {
+            const json = JSON.parse(hText);
+            function findSend(node) {
+              if (!node) return null;
+              const label = (node.label || node.identifier || '').toLowerCase();
+              if ((label.includes('send') || label === 'arrow.up.circle.fill') && node.frame) return node;
+              if (node.children) {
+                for (const child of node.children) {
+                  const found = findSend(child);
+                  if (found) return found;
+                }
+              }
+              return null;
+            }
+            const sendEl = findSend(json?.axElement || json);
+            if (sendEl && sendEl.frame) {
+              const cx = Math.round(sendEl.frame.X + sendEl.frame.Width / 2);
+              const cy = Math.round(sendEl.frame.Y + sendEl.frame.Height / 2);
+              const pctX = Math.round(cx / screenW * 100);
+              const pctY = Math.round(cy / screenH * 100);
+              console.log(`[typeAndSubmit] Send button found at (${pctX}%, ${pctY}%) — label: "${sendEl.label || sendEl.identifier}"`);
+              if (isPhone && maestro.touchPoint) {
+                await maestro.touchPoint(cx, cy);
+              } else {
+                const header = currentAppId ? `appId: ${currentAppId}\n---\n` : 'appId: any\n---\n';
+                await maestro.runFlow(`${header}- tapOn:\n    point: "${pctX}%, ${pctY}%"`);
+              }
+              sendTapped = true;
+              await sleep(500); // Wait for send animation to complete
+            }
+          } catch {}
+        } catch {}
+        // Fallback: use pressKey enter if hierarchy lookup failed
+        if (!sendTapped) {
+          console.log('[typeAndSubmit] Send button NOT found in hierarchy — falling back to pressKey enter');
+          await executeTool('pressKey', { key: 'enter' });
         }
       } else {
         await executeTool('pressKey', { key });
       }
-      return `Typed "${args.text}" into "${args.elementText}" and pressed ${key}`;
+      return key === 'send'
+        ? `Message sent: "${args.text}" — the send button was tapped automatically. Do NOT tap send again. Take a screenshot to verify.`
+        : `Typed "${args.text}" into "${args.elementText}" and submitted via ${key}`;
     }
     case 'zoomAndTap': {
       // ZoomClick: crop around rough area, send zoomed image to AI for precise targeting
@@ -942,6 +998,37 @@ async function executeTool(name, args) {
         return `Recent task history:\n${recent}`;
       }
       return '(no task history yet)';
+    }
+
+    // === WEB SEARCH ===
+    case 'webSearch': {
+      const braveKey = process.env.BRAVE_API_KEY;
+      if (!braveKey) {
+        return 'ERROR: BRAVE_API_KEY not set in .env. Cannot perform web search.';
+      }
+      try {
+        const url = new URL('https://api.search.brave.com/res/v1/web/search');
+        url.searchParams.set('q', args.query);
+        url.searchParams.set('count', '5');
+        const res = await fetch(url, {
+          headers: {
+            'Accept': 'application/json',
+            'Accept-Encoding': 'gzip',
+            'X-Subscription-Token': braveKey,
+          },
+        });
+        if (!res.ok) {
+          return `ERROR: Brave Search API returned ${res.status}`;
+        }
+        const data = await res.json();
+        const results = (data.web?.results ?? []).slice(0, 5);
+        if (results.length === 0) return 'No search results found.';
+        const formatted = results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.description || ''}`).join('\n\n');
+        console.log(`[WebSearch] "${args.query}" → ${results.length} results`);
+        return `Web search results for "${args.query}":\n\n${formatted}`;
+      } catch (e) {
+        return `ERROR: Web search failed: ${e.message}`;
+      }
     }
 
     // === HUMAN-IN-THE-LOOP ===
@@ -1030,32 +1117,35 @@ ${appListStr}
 </AVAILABLE_APPS>
 
 <STRATEGY>
-${isPhone ? `1. Use openApp to launch the right app for the task, then takeScreenshot to see the screen.
-2. Use getUIElements to discover exact button/element text, then tapText with exact text.
-3. Prefer tapText over tap (coordinates) — tapText is more reliable.
+${isPhone ? `1. Use openApp to launch the right app for the task.
+2. Every screenshot automatically includes UI elements with exact coordinates. Use these coordinates with tap(x, y) for precise tapping — do NOT guess coordinates from the screenshot.
+3. If you need to refresh UI elements without a screenshot, call getUIElements.
 4. After completing actions: takeScreenshot to VERIFY the task is actually done, then taskComplete.
 NOTE: This is a PHYSICAL iPhone. Deep link shortcuts (searchMaps, googleSearch, openURL) will open the app but you must then navigate the UI manually.`
 : `1. Use INSTANT tools when possible: searchMaps, googleSearch, openURL, getDirections, composeMessage, setAppearance, setLocation. These complete in one step.
-2. For app UI interaction: ALWAYS call getUIElements FIRST to see all buttons/fields with their exact accessibility text. Then use tapText with the exact text.
-3. Use takeScreenshot only when you need to visually verify the result.
-4. Only use tap (coordinates) as an absolute last resort.
+2. Every screenshot automatically includes UI elements with exact coordinates. Use these coordinates with tap(x, y) for precise tapping — do NOT guess coordinates from the screenshot.
+3. If you need to refresh UI elements without a screenshot, call getUIElements.
+4. Use takeScreenshot only when you need to visually verify the result.
 5. After instant tools or completing actions: takeScreenshot to verify, then taskComplete.`}
 </STRATEGY>
 
 <IMPORTANT>
-* iOS Messages: the SEND button is a BLUE UP-ARROW circle INSIDE the text input bar on the far right, at approximately x=92, y=74. Do NOT tap the "=A" text formatting button below the text field. To message a specific contact, find their existing conversation first — do NOT tap "New Message" unless they have no existing thread.
+* iOS Messages: the SEND button is a BLUE UP-ARROW circle INSIDE the text input bar on the far right. Its position changes when the keyboard is open — always use coordinates from the auto-bundled UI elements, NOT hardcoded values. Do NOT tap the text effects/formatting button. To message a specific contact, find their existing conversation first — do NOT tap "New Message" unless they have no existing thread.
 * iOS Photos: the MOST RECENT photo/image is at the BOTTOM-RIGHT of the grid. Scroll DOWN first if needed.
 * iOS Maps: the search bar is at the BOTTOM of the screen, not the top.
-* If the same action fails 2 times with no change, your coordinates are WRONG. Try: getUIElements to find exact element text, tapText instead of tap, scroll to reveal hidden elements, or a completely different approach.
+* If the same action fails 2 times with no change, your coordinates are WRONG. Check the UI elements list bundled with the screenshot for exact coordinates, or scroll to reveal hidden elements, or try a completely different approach.
 </IMPORTANT>
 
 <RULES>
 ${isPhone ? '- Use openApp to launch apps, then navigate UI with tap/tapText/inputText' : '- Prefer instant tools over tapping'}
-- Prefer tapText over tap (coordinates). tapText uses exact text matching and is more reliable.
-- Use getUIElements to discover what buttons/elements exist before tapping.
+- Prefer using tap(x, y) with coordinates from the auto-bundled UI elements list. These coordinates come directly from the view hierarchy and are exact.
+- Use tapText when you know the exact accessibility text. Use getUIElements only if you need to refresh the element list without taking a screenshot.
 - BEFORE calling taskComplete, you MUST takeScreenshot and verify the task is actually done on screen.
-- CRITICAL — askUser RULES: You MUST call askUser before: sending any message/email/call, deleting anything, making purchases, OR when multiple people/results match and you need to pick one. NEVER guess which contact — always ask. NEVER send a message without confirming the recipient. EXCEPTION: if memory already tells you which contact the user means, you may skip askUser. Keep options to 2-3 choices.
-- MEMORY: When you learn something new about the user (preferred contact, address, preference), call saveMemory to persist it. After askUser resolves ambiguity, ALWAYS saveMemory with the result so you never ask the same question twice.${grounding === 'grid' ? `
+- SCREEN UNDERSTANDING (do this BEFORE every action on a new or changed screen): (1) Describe what app/screen you see, (2) Read ALL visible text — especially instructions, labels, and placeholders, (3) Identify interactive elements — text fields, buttons, toggles — from the UI elements list, (4) Determine the correct interaction: should you tap, type, scroll, or something else? Only THEN choose your action. This is critical for unfamiliar apps, games, and non-standard interfaces.
+- UNFAMILIAR APPS: If after reading the screen you still don't understand how to interact, use webSearch to look up how the app works BEFORE acting. Do NOT blindly tap UI elements.
+- WEB SEARCH: For factual information (weather, scores, prices, news, how-to, definitions), ALWAYS use webSearch first — it returns results in 0.6s without leaving the current app. Do NOT open Safari, Weather, or any other app just to look up information that webSearch can provide. Only navigate to an app when the task requires YOUR personal data (your calendar, your photos, your messages, your contacts) that isn't available on the web. NEVER open result URLs on the device — read the search results from the tool response.
+- CRITICAL — askUser RULES: The user's command IS the confirmation. If they said "text Emiliano hello", JUST DO IT — do NOT ask "do you want to send this?" Only call askUser when: (1) contact is ambiguous (multiple people match), (2) purchases or payments, (3) deleting data, (4) the task is genuinely vague and you need clarification. NEVER re-confirm an explicit command. NEVER parrot the task back as a question.
+- MEMORY: When you learn something new about the user (preferred contact, address, preference), call saveMemory to persist it. After askUser resolves ambiguity, ALWAYS saveMemory with the result so you never ask the same question twice. IMPORTANT: Always bundle saveMemory with another action tool in the same response — never use an entire step just to save memory.${grounding === 'grid' ? `
 - GRID OVERLAY: The screenshot has yellow grid lines at every 10% with labels at 20%, 40%, 60%, 80%. Use these to estimate tap coordinates accurately.` : ''}${grounding === 'zoomclick' ? `
 - ZOOM TAP: When you need to tap a SMALL icon or when elements are close together, use zoomAndTap instead of tap for precise targeting.` : ''}
 </RULES>${agentMode === 'vision-gated' ? `
@@ -1125,15 +1215,43 @@ let visionSteps = 0;
 let gatedSteps = 0;
 let prevScreenHash = null;
 let currentUILabels = [];
+let prevAutoUICount = -1;
+let unchangedScreenCount = 0;
 
 for (let step = 1; step <= maxSteps; step++) {
-  // Stuck detection
+  // Stuck detection (exact match OR same tool with similar coordinates)
   let stuckThisStep = false;
   if (recentActions.length >= 3) {
     const last3 = recentActions.slice(-3);
+    // Exact match
     if (last3.every(a => a === last3[0])) {
       stuckThisStep = true;
-      messages.push({ role: 'user', content: `WARNING: You have tried "${last3[0]}" 3 times with no progress. The coordinates or element may be WRONG. Try: 1) getUIElements to see what is actually on screen, 2) tapText with different text, 3) a completely different approach.` });
+    }
+    // Semantic match: same tool name, coordinates within 10% of each other
+    if (!stuckThisStep) {
+      try {
+        const parsed = last3.map(a => {
+          const m = a.match(/^(\w+)\((.+)\)$/);
+          return m ? { tool: m[1], args: JSON.parse(m[2]) } : null;
+        });
+        if (parsed.every(p => p && p.tool === parsed[0].tool)) {
+          // Same tool 3 times — check if coordinates are clustered
+          if (parsed[0].args.x !== undefined && parsed[0].args.y !== undefined) {
+            const xs = parsed.map(p => p.args.x);
+            const ys = parsed.map(p => p.args.y);
+            if (Math.max(...xs) - Math.min(...xs) <= 10 && Math.max(...ys) - Math.min(...ys) <= 10) {
+              stuckThisStep = true;
+            }
+          }
+          // Same tapText target
+          if (parsed[0].tool === 'tapText' && parsed.every(p => p.args.text === parsed[0].args.text)) {
+            stuckThisStep = true;
+          }
+        }
+      } catch {}
+    }
+    if (stuckThisStep) {
+      messages.push({ role: 'user', content: `WARNING: You have repeated similar actions 3 times with no progress. Your coordinates or element text may be WRONG. Try: 1) getUIElements to see what is actually on screen with exact coordinates, 2) tap with coordinates from getUIElements, 3) a completely different approach.` });
     }
   }
 
@@ -1190,6 +1308,7 @@ for (let step = 1; step <= maxSteps; step++) {
     messages.push(msg);
 
     let needsScreenshot = false;
+    let needsSettleDelay = false;
     let isDone = false;
     let isFailed = false;
     let doneMsg = '';
@@ -1204,8 +1323,8 @@ for (let step = 1; step <= maxSteps; step++) {
       if (recentActions.length > 10) recentActions.shift();
 
       let result;
+      const execStart = Date.now();
       try {
-        const execStart = Date.now();
         result = await executeTool(toolName, toolArgs);
         const execMs = Date.now() - execStart;
         const execTime = (execMs / 1000).toFixed(1);
@@ -1251,14 +1370,18 @@ for (let step = 1; step <= maxSteps; step++) {
           const actionTools = ['openApp', 'tap', 'tapText', 'inputText', 'pressKey', 'scroll', 'swipe', 'typeAndSubmit', 'hideKeyboard'];
           if (actionTools.includes(toolName) && !needsScreenshot) {
             needsScreenshot = true;
+            // Track if this was a navigation action (needs settle delay for iOS animations)
+            const navActions = ['tap', 'tapText', 'scroll', 'swipe', 'typeAndSubmit'];
+            if (navActions.includes(toolName)) needsSettleDelay = true;
             console.log(`[Auto-capture] Screenshot queued after ${toolName}`);
           }
         }
       } catch (e) {
+        const execMs = Date.now() - execStart;
         result = `Error: ${e.message}`;
-        entry.tools.push({ name: toolName, time: 0, error: true });
+        entry.tools.push({ name: toolName, time: execMs / 1000, error: true });
         errorThisStep = true;
-        console.log(`[Tool] → ERROR: ${e.message}`);
+        console.log(`[Tool] → ERROR: ${e.message} (${(execMs / 1000).toFixed(1)}s)`);
       }
 
       messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
@@ -1343,7 +1466,11 @@ for (let step = 1; step <= maxSteps; step++) {
       process.exit(1);
     }
 
-    // Screenshot
+    // Settle delay: only after navigation actions (tap, scroll, swipe) on physical device
+    // openApp, inputText, pressKey don't trigger iOS transition animations
+    if (needsScreenshot && isPhone && needsSettleDelay) {
+      await sleep(350); // iOS animations: nav push 330ms, keyboard 250ms, modals 350ms
+    }
     if (needsScreenshot) {
       // In single-image/vision-gated mode, strip old screenshots so only the latest image is sent
       if (agentMode === 'single-image' || agentMode === 'vision-gated') {
@@ -1358,49 +1485,118 @@ for (let step = 1; step <= maxSteps; step++) {
       }
       try {
         const ssStart = Date.now();
-        let buffer;
-        if (isPhone) {
-          // Phone: use Maestro screenshot via bridge
-          const ssResult = await maestro.screenshot();
-          buffer = Buffer.from(ssResult.data, 'base64');
-        } else {
-          // Simulator: use simctl (faster)
-          const p = join(tmpdir(), `screen-${Date.now()}.png`);
-          await runShell(`xcrun simctl io booted screenshot "${p}"`, 10000);
-          buffer = readFileSync(p);
-          try { unlinkSync(p); } catch {}
-        }
-        // Compress: resize to 768px wide + JPEG quality 85 (if --compress flag)
-        if (useCompression) {
-          try {
-            const sharp = (await import('sharp')).default;
-            const metadata = await sharp(buffer).metadata();
-            if (metadata.width > 768) {
-              buffer = await sharp(buffer)
-                .resize(768, null, { fit: 'inside' })
-                .jpeg({ quality: 85 })
-                .toBuffer();
-            }
-          } catch {}
-        }
 
-        // Apply grid overlay if grounding mode is 'grid'
-        if (grounding === 'grid') {
-          try {
-            buffer = await addGridOverlay(buffer);
-          } catch (e) {
-            console.log(`[Grid] Overlay failed: ${e.message}`);
+        // Run screenshot and hierarchy fetch in parallel (both are independent HTTP calls)
+        const screenshotPromise = (async () => {
+          let buffer;
+          if (isPhone) {
+            const ssResult = await maestro.screenshot();
+            buffer = Buffer.from(ssResult.data, 'base64');
+          } else {
+            const p = join(tmpdir(), `screen-${Date.now()}.png`);
+            await runShell(`xcrun simctl io booted screenshot "${p}"`, 10000);
+            buffer = readFileSync(p);
+            try { unlinkSync(p); } catch {}
           }
-        }
-        const ssTime = ((Date.now() - ssStart) / 1000).toFixed(1);
+          if (useCompression) {
+            try {
+              const sharp = (await import('sharp')).default;
+              const metadata = await sharp(buffer).metadata();
+              if (metadata.width > 768) {
+                buffer = await sharp(buffer).resize(768, null, { fit: 'inside' }).jpeg({ quality: 85 }).toBuffer();
+              }
+            } catch {}
+          }
+          if (grounding === 'grid') {
+            try { buffer = await addGridOverlay(buffer); } catch (e) { console.log(`[Grid] Overlay failed: ${e.message}`); }
+          }
+          return buffer;
+        })();
+
+        const hierarchyPromise = (async () => {
+          try {
+            const hierResult = await maestro.viewHierarchy();
+            const hText = hierResult.text || '';
+            const uiNoise = ['scroll bar', 'battery', 'Cellular', 'Wi-Fi bars', 'PM', 'AM', 'No signal', 'Not charging', 'signal strength', 'battery power', 'location services', 'Location tracking'];
+            const elems = [];
+            const sw = isPhone ? phoneScreenWidth : 402;
+            const sh = isPhone ? phoneScreenHeight : 874;
+            try {
+              const json = JSON.parse(hText);
+              function collectAuto(node) {
+                if (!node) return;
+                if (node.label && node.label.trim()) {
+                  const label = node.label.trim();
+                  if (!uiNoise.some(n => label.includes(n))) {
+                    let e;
+                    if (node.frame) {
+                      const px = Math.round((node.frame.X + node.frame.Width / 2) / sw * 100);
+                      const py = Math.round((node.frame.Y + node.frame.Height / 2) / sh * 100);
+                      e = `- "${label}" at (${px}%, ${py}%)`;
+                    } else {
+                      e = `- "${label}"`;
+                    }
+                    if (!elems.some(f => f.startsWith(`- "${label}"`))) elems.push(e);
+                  }
+                }
+                if (node.children) node.children.forEach(collectAuto);
+              }
+              collectAuto(json?.axElement || json);
+            } catch {
+              const boundsRe = /\[(\d+),(\d+)\]\[(\d+),(\d+)\]/;
+              for (const line of hText.split('\n')) {
+                const lm = line.match(/accessibilityText[="] *:? *"?([^";,\n]+)/);
+                if (!lm) continue;
+                const label = lm[1].trim();
+                if (!label || uiNoise.some(n => label.includes(n))) continue;
+                const bm = line.match(boundsRe);
+                let e;
+                if (bm) {
+                  const px = Math.round(((parseInt(bm[1]) + parseInt(bm[3])) / 2) / sw * 100);
+                  const py = Math.round(((parseInt(bm[2]) + parseInt(bm[4])) / 2) / sh * 100);
+                  e = `- "${label}" at (${px}%, ${py}%)`;
+                } else {
+                  e = `- "${label}"`;
+                }
+                if (!elems.some(f => f.startsWith(`- "${label}"`))) elems.push(e);
+              }
+            }
+            if (elems.length > 0) {
+              console.log(`[Auto-UI] ${elems.length} elements bundled with screenshot`);
+              return `\n\nUI elements on screen:\n${elems.join('\n')}\nUse tap(x, y) with coordinates above for precise tapping.`;
+            }
+          } catch (e) {
+            console.log(`[Auto-UI] Hierarchy fetch failed: ${e.message}`);
+          }
+          return '';
+        })();
+
+        const [buffer, uiElementsText] = await Promise.all([screenshotPromise, hierarchyPromise]);
         const b64 = buffer.toString('base64');
+        const ssTime = ((Date.now() - ssStart) / 1000).toFixed(1);
         entry.screenshotTime = (Date.now() - ssStart) / 1000;
         console.log(`[Screenshot] OK (${Math.round(buffer.length / 1024)} KB, ${ssTime}s${useCompression ? ' +compressed' : ''}${grounding === 'grid' ? ' +grid' : ''})`);
+
+        // Unchanged screen detection: if element count is identical for 3 steps, agent may not understand the app
+        const currentAutoUICount = (uiElementsText.match(/^- "/gm) || []).length;
+        let unchangedWarning = '';
+        if (currentAutoUICount > 0 && currentAutoUICount === prevAutoUICount) {
+          unchangedScreenCount++;
+          if (unchangedScreenCount >= 3) {
+            unchangedWarning = '\n\nWARNING: The screen has NOT changed after 3 actions — your taps are having no effect. You may not understand how this app or screen works. STOP tapping and try: 1) Read ALL text on screen carefully for instructions, 2) Use webSearch to look up how this app/game works, 3) Look for text fields or buttons you may have missed.';
+            console.log(`[Unchanged] Screen unchanged for ${unchangedScreenCount} steps — suggesting webSearch`);
+            unchangedScreenCount = 0; // Reset after warning
+          }
+        } else {
+          unchangedScreenCount = 0;
+        }
+        prevAutoUICount = currentAutoUICount;
+
         messages.push({
           role: 'user',
           content: [
             { type: 'image_url', image_url: { url: `data:image/png;base64,${b64}` } },
-            { type: 'text', text: 'Here is the current screen. Continue with the task.' },
+            { type: 'text', text: `Here is the current screen. Continue with the task.${uiElementsText}${unchangedWarning}` },
           ],
         });
       } catch (e) {
