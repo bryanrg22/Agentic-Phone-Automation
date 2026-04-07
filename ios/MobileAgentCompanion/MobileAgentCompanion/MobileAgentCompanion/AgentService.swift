@@ -26,6 +26,7 @@ class AgentService {
         let mode: String?
         let model: String?
         let provider: String?
+        let agentLogs: [String]?
 
         var id: String { timestamp + task }
 
@@ -64,21 +65,90 @@ class AgentService {
     }
 
     func fetchMemories() async {
-        guard let url = URL(string: "\(serverURL)/memories") else { return }
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            let remote = try JSONDecoder().decode([MemoryEntry].self, from: data)
-            await MainActor.run {
-                self.memories = remote
-                print("[Memories] Synced \(remote.count) facts")
+        // Always load local memories first (works without Mac)
+        await fetchLocalMemories()
+        // Also try server sync if connected (non-on-device mode)
+        if !isOnDeviceMode, !serverURL.isEmpty, let url = URL(string: "\(serverURL)/memories") {
+            do {
+                let (data, _) = try await URLSession.shared.data(from: url)
+                let remote = try JSONDecoder().decode([MemoryEntry].self, from: data)
+                await MainActor.run {
+                    self.memories = remote
+                    print("[Memories] Synced \(remote.count) facts from server")
+                }
+            } catch {
+                print("[Memories] Server sync failed (using local): \(error.localizedDescription)")
             }
-        } catch {
-            print("[Memories] Fetch failed (showing cached): \(error.localizedDescription)")
         }
     }
 
+    /// Read memories from local Documents directory (on-device mode)
+    private func fetchLocalMemories() async {
+        let docsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let memoriesURL = docsDir.appendingPathComponent("memories/user.md")
+        guard let text = try? String(contentsOf: memoriesURL, encoding: .utf8) else {
+            print("[Memories] No local memories file found")
+            return
+        }
+        let lines = text.split(separator: "\n")
+        var entries: [MemoryEntry] = []
+        for (i, line) in lines.enumerated() {
+            let str = String(line).trimmingCharacters(in: .whitespaces)
+            guard str.hasPrefix("- ") else { continue }
+            let content = String(str.dropFirst(2))
+            // Parse "[2026-04-05] fact text" format
+            var date: String?
+            var fact = content
+            if content.hasPrefix("["), let closeBracket = content.firstIndex(of: "]") {
+                date = String(content[content.index(after: content.startIndex)..<closeBracket])
+                fact = String(content[content.index(after: closeBracket)...]).trimmingCharacters(in: .whitespaces)
+            }
+            entries.append(MemoryEntry(id: i, date: date, fact: fact))
+        }
+        await MainActor.run {
+            self.memories = entries
+            print("[Memories] Loaded \(entries.count) local facts")
+        }
+    }
+
+    func deleteHistoryEntry(_ entry: TaskHistoryEntry) {
+        // Remove from local file
+        let docsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let historyURL = docsDir.appendingPathComponent("logs/tasks.jsonl")
+        if let text = try? String(contentsOf: historyURL, encoding: .utf8) {
+            let lines = text.split(separator: "\n")
+            let filtered = lines.filter { line in
+                guard let data = line.data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return true }
+                let ts = json["timestamp"] as? String ?? ""
+                let task = json["task"] as? String ?? ""
+                return (ts + task) != entry.id
+            }
+            let newContent = filtered.joined(separator: "\n") + (filtered.isEmpty ? "" : "\n")
+            try? newContent.write(to: historyURL, atomically: true, encoding: .utf8)
+        }
+        // Remove from in-memory array (also updates UserDefaults cache)
+        taskHistory.removeAll { $0.id == entry.id }
+        print("[History] Deleted: \(entry.task)")
+    }
+
+    func deleteLocalMemory(_ entry: MemoryEntry) {
+        let docsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let memoriesURL = docsDir.appendingPathComponent("memories/user.md")
+        guard let text = try? String(contentsOf: memoriesURL, encoding: .utf8) else { return }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let filtered = lines.filter { !$0.contains(entry.fact) }
+        let newContent = filtered.joined(separator: "\n")
+        try? newContent.write(to: memoriesURL, atomically: true, encoding: .utf8)
+        memories.removeAll { $0.fact == entry.fact }
+        print("[Memory] Deleted local: \(entry.fact.prefix(40))...")
+    }
+
     func deleteMemory(_ entry: MemoryEntry) async {
-        guard let url = URL(string: "\(serverURL)/memories/delete") else { return }
+        // Always try local delete first
+        deleteLocalMemory(entry)
+        // Also try server if connected
+        guard !isOnDeviceMode, let url = URL(string: "\(serverURL)/memories/delete") else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -95,18 +165,18 @@ class AgentService {
     }
 
     func editMemory(_ entry: MemoryEntry, newFact: String) async {
-        guard let url = URL(string: "\(serverURL)/memories/edit") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONEncoder().encode(["oldFact": entry.fact, "newFact": newFact])
-        do {
-            let (_, _) = try await URLSession.shared.data(for: request)
-            await fetchMemories() // Refresh from server
-            print("[Memories] Edited: \(entry.fact.prefix(30))... → \(newFact.prefix(30))...")
-        } catch {
-            print("[Memories] Edit failed: \(error.localizedDescription)")
+        // Edit locally in the file
+        let docsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let memoriesURL = docsDir.appendingPathComponent("memories/user.md")
+        if let text = try? String(contentsOf: memoriesURL, encoding: .utf8) {
+            let updated = text.replacingOccurrences(of: entry.fact, with: newFact)
+            try? updated.write(to: memoriesURL, atomically: true, encoding: .utf8)
         }
+        // Update in-memory array
+        if let idx = memories.firstIndex(where: { $0.fact == entry.fact }) {
+            memories[idx] = MemoryEntry(id: entry.id, date: entry.date, fact: newFact)
+        }
+        print("[Memory] Edited: \(entry.fact.prefix(30))... → \(newFact.prefix(30))...")
     }
 
     // MARK: - History Cache
@@ -133,21 +203,8 @@ class AgentService {
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     #endif
 
-    struct AgentStatusResponse: Codable {
-        let isActive: Bool
-        let taskName: String
-        let currentStep: Int
-        let totalSteps: Int
-        let thought: String
-        let phase: String
-        let toolName: String
-        let elapsed: String
-        let isComplete: Bool
-        let success: Bool
-        let waitingForInput: Bool?
-        let inputQuestion: String?
-        let inputOptions: [String]?
-    }
+    // AgentStatusResponse is now a top-level type (see below AgentService)
+    // so OnDeviceAgent can also use it.
 
     func startPolling() {
         guard !serverURL.isEmpty else { return }
@@ -229,22 +286,54 @@ class AgentService {
     }
 
     func fetchHistory() async {
-        guard let url = URL(string: "\(serverURL)/history") else { return }
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            let remoteEntries = try JSONDecoder().decode([TaskHistoryEntry].self, from: data)
-            await MainActor.run {
-                // Merge: remote is source of truth, deduplicate by id
-                let existingIds = Set(self.taskHistory.map(\.id))
-                let newEntries = remoteEntries.filter { !existingIds.contains($0.id) }
-                if !newEntries.isEmpty || remoteEntries.count != self.taskHistory.count {
-                    self.taskHistory = remoteEntries.reversed() // newest first
-                    print("[History] Synced \(remoteEntries.count) tasks (\(newEntries.count) new)")
+        // Always load local history first (works without Mac)
+        await fetchLocalHistory()
+        // Also try server sync if connected (non-on-device mode)
+        if !isOnDeviceMode, !serverURL.isEmpty, let url = URL(string: "\(serverURL)/history") {
+            do {
+                let (data, _) = try await URLSession.shared.data(from: url)
+                let remoteEntries = try JSONDecoder().decode([TaskHistoryEntry].self, from: data)
+                await MainActor.run {
+                    let existingIds = Set(self.taskHistory.map(\.id))
+                    let newEntries = remoteEntries.filter { !existingIds.contains($0.id) }
+                    if !newEntries.isEmpty || remoteEntries.count != self.taskHistory.count {
+                        self.taskHistory = remoteEntries.reversed()
+                        print("[History] Synced \(remoteEntries.count) tasks from server (\(newEntries.count) new)")
+                    }
                 }
+            } catch {
+                print("[History] Server sync failed (using local): \(error.localizedDescription)")
             }
-        } catch {
-            print("[History] Fetch failed (showing cached): \(error.localizedDescription)")
-            // Cached history stays visible — no action needed
+        }
+    }
+
+    /// Read history from local Documents directory (on-device mode)
+    private func fetchLocalHistory() async {
+        let docsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let historyURL = docsDir.appendingPathComponent("logs/tasks.jsonl")
+        guard let text = try? String(contentsOf: historyURL, encoding: .utf8) else {
+            print("[History] No local history file found")
+            return
+        }
+        let entries: [TaskHistoryEntry] = text.split(separator: "\n").compactMap { line in
+            guard let data = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            return TaskHistoryEntry(
+                timestamp: json["timestamp"] as? String ?? "",
+                task: json["task"] as? String ?? "",
+                summary: json["summary"] as? String,
+                steps: json["steps"] as? Int ?? 0,
+                time: json["time"] as? String ?? "0",
+                success: json["success"] as? Bool ?? false,
+                mode: json["mode"] as? String,
+                model: json["model"] as? String,
+                provider: json["provider"] as? String,
+                agentLogs: json["agentLogs"] as? [String]
+            )
+        }
+        await MainActor.run {
+            self.taskHistory = entries.reversed()
+            print("[History] Loaded \(entries.count) local tasks")
         }
     }
 
@@ -494,4 +583,57 @@ class AgentService {
             }
         }
     }
+
+    // MARK: - On-Device Mode
+
+    var onDeviceAgent: OnDeviceAgent { OnDeviceAgent.shared }
+    var isOnDeviceMode = false
+    private var onDeviceObserverTask: Task<Void, Never>?
+
+    /// Start on-device mode: observe OnDeviceAgent status and drive Live Activities
+    func startOnDeviceMode() {
+        isOnDeviceMode = true
+        isPolling = true
+        #if !os(watchOS) && !targetEnvironment(appExtension)
+        beginBackgroundTask()
+        #endif
+        onDeviceObserverTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.pollOnDevice()
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
+    }
+
+    func stopOnDeviceMode() {
+        isOnDeviceMode = false
+        onDeviceObserverTask?.cancel()
+        onDeviceObserverTask = nil
+    }
+
+    private func pollOnDevice() async {
+        guard let status = onDeviceAgent.currentStatus else { return }
+        await MainActor.run {
+            self.currentState = status
+            self.handleStatusUpdate(status)
+        }
+    }
+}
+
+// MARK: - AgentStatusResponse (top-level so OnDeviceAgent can also use it)
+
+struct AgentStatusResponse: Codable {
+    let isActive: Bool
+    let taskName: String
+    let currentStep: Int
+    let totalSteps: Int
+    let thought: String
+    let phase: String
+    let toolName: String
+    let elapsed: String
+    let isComplete: Bool
+    let success: Bool
+    let waitingForInput: Bool?
+    let inputQuestion: String?
+    let inputOptions: [String]?
 }

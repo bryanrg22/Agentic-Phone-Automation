@@ -14,6 +14,7 @@ struct RespondToAgentIntent: LiveActivityIntent {
     }
 
     func perform() async throws -> some IntentResult {
+        // Send response to the server (works for both remote and on-device via server)
         guard let serverURL = UserDefaults.standard.string(forKey: "agentServerURL"),
               let url = URL(string: "\(serverURL)/respond") else {
             return .result()

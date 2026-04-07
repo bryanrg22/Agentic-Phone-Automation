@@ -4,15 +4,33 @@
 
 The MobileAgentCompanion app runs on your iPhone alongside the agent. It provides real-time status monitoring via the Dynamic Island and a full interface for viewing task history and managing agent memory.
 
+## Modes
+
+The app supports two operating modes, selectable via a toggle at the top of the Status tab:
+
+| Mode | Agent runs on | XCTest runner via | Action Button |
+|------|--------------|-------------------|---------------|
+| **Mac** | Mac (`agent.mjs`) | USB bridge | POST to Mac server |
+| **On-Device** | iPhone (`OnDeviceAgent.swift`) | localhost:22087 | App Intent (direct) |
+
 ## Features
 
 ### Status Tab
-Real-time view of the agent's current state, updated every 500ms via HTTP polling to the Mac server.
+In **Mac mode**: polls Mac server every 500ms. In **On-Device mode**: reads directly from `OnDeviceAgent.currentStatus`.
 
-**States:**
+**Mac mode states:**
 - **Not connected** — Enter your Mac's hostname and tap Connect
 - **Connecting** — Spinner while establishing connection
-- **Idle** — Connected, waiting for a task. "Hold the Action Button and speak a command"
+- **Idle** — Connected, waiting for a task
+
+**On-Device mode features:**
+- **Runner health check** — green/red dot showing if XCTest runner is alive on localhost
+- **Task input field** — type a task and tap play to run it on-device
+- **Stop button** — cancel the running agent
+- **Settings** (gear icon) — configure provider, model, API keys, max steps, XCTest port
+- **Agent logs card** — color-coded real-time logs (blue=AI, orange=tools, purple=screenshots, red=errors, green=completion)
+
+**Shared states:**
 - **Active** — Shows task name, current step, phase (Thinking/Acting/Observing), elapsed time, agent's current thought, progress bar with phase-colored fill, and current tool name as a badge
 - **Complete** — Green checkmark with step count and total time
 
@@ -36,7 +54,9 @@ Browse all completed tasks, grouped by day (Today, Yesterday, older dates).
 - Pull-to-refresh to sync new tasks from server
 - **Offline cache** — History is stored in UserDefaults. Previously synced tasks are visible even when disconnected from the server
 
-**Data source:** `logs/tasks.jsonl` on the Mac, served via `GET /history` endpoint.
+**Data source:** Mac mode reads from `GET /history` endpoint. On-device mode reads from `Documents/logs/tasks.jsonl` on the phone.
+
+**On-device tasks** include full agent logs — tap any entry to see step-by-step execution details with color-coded output.
 
 ### Memory Tab
 View, edit, and delete facts the agent has learned about you.
@@ -48,7 +68,7 @@ View, edit, and delete facts the agent has learned about you.
 - Pull-to-refresh to sync from server
 - **Offline cache** — Memories are stored in UserDefaults. Visible offline, syncs when connected
 
-**Data source:** `memories/user.md` on the Mac, served via `GET /memories`, `POST /memories/delete`, `POST /memories/edit` endpoints.
+**Data source:** Mac mode uses `GET /memories`, `POST /memories/delete`, `POST /memories/edit` endpoints. On-device mode reads from `Documents/memories/user.md` on the phone. Memory is seeded from the Mac's file on first launch.
 
 **Memory hygiene tips:**
 - Delete weather/prices/scores — they go stale in hours
@@ -68,21 +88,35 @@ Shows agent progress as a Live Activity on the lock screen and Dynamic Island.
 
 ## Architecture
 
+### Mac Mode
 ```
 iPhone                              Mac (same Wi-Fi)
 ──────                              ────────────────
 Companion App                       Frontend Server (port 8000)
   ├── Status tab ──── polls ────→  GET /status (every 500ms)
-  ├── History tab ─── fetches ──→  GET /history (on tab switch)
+  ├── History tab ─── fetches ──→  GET /history
   ├── Memory tab ──── fetches ──→  GET /memories
-  │   ├── Edit ────── posts ────→  POST /memories/edit
-  │   └── Delete ──── posts ────→  POST /memories/delete
-  └── Dynamic Island                  ↑
+  └── Dynamic Island
       ├── Stop ────── posts ────→  POST /stop
       └── Respond ─── posts ────→  POST /respond
+```
 
-Action Button Shortcut
-  └── Voice → POST /task ────────→  POST /task → spawns agent.mjs
+### On-Device Mode
+```
+iPhone (everything local)           Mac (Wi-Fi tunnel only)
+─────────────────────────           ──────────────────────
+Companion App                       pymobiledevice3 tunnel
+  ├── OnDeviceAgent.swift              └── keeps XCTest runner alive
+  │   ├── LLM API calls (cellular/Wi-Fi)
+  │   ├── XCTest runner (localhost:22087)
+  │   ├── Memory (Documents/memories/user.md)
+  │   └── History (Documents/logs/tasks.jsonl)
+  ├── Status tab ──── reads OnDeviceAgent.currentStatus
+  ├── History tab ─── reads local JSONL file
+  ├── Memory tab ──── reads local markdown file
+  └── Dynamic Island ── driven by AgentService observer
+
+Action Button → "Run Agent Task" App Intent → OnDeviceAgent.run()
 ```
 
 ## Server Endpoints

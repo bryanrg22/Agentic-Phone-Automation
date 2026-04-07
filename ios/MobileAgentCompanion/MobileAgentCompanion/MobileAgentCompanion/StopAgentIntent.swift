@@ -9,7 +9,7 @@ struct StopAgentIntent: LiveActivityIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
-        // Send stop command to the server
+        // Try server stop (works for both remote Mac mode and as fallback)
         if let serverURL = UserDefaults.standard.string(forKey: "agentServerURL"),
            let url = URL(string: "\(serverURL)/stop") {
             var request = URLRequest(url: url)

@@ -59,6 +59,11 @@ The agent struggles with apps it hasn't seen before — doesn't know how to play
 
 - **Different network / no computer** — Run the agent server in the cloud. Phone connects to cloud server over the internet. Would require: cloud-hosted server, port forwarding or tunnel (ngrok/Cloudflare Tunnel), and a way to bridge Maestro commands to the phone remotely. Much harder — likely needs a different architecture.
 
+- **One-device ownership UX** — User should only need an iPhone. Control-plane infrastructure (XCTest/WDA channel) can be provided by:
+  - self-hosted home Mac worker, or
+  - hosted managed worker subscription ("device automation as a service").
+  Phone remains the primary runtime for planning, memory, and user interaction.
+
 ## Agentic Features
 
 - **MCP tool integration** — Connect to external MCP servers (calendar, email, Slack, etc.) so the agent can pull data from other services, not just what's on screen.
@@ -74,7 +79,18 @@ The agent struggles with apps it hasn't seen before — doesn't know how to play
 - **Rule engine** — User defines trigger rules: `{ when: "message from Kenny contains link", do: "open the link in Safari" }`. Stored in a `rules.json` file. Agent checks rules against incoming events.
 - **Notification monitoring** — Read iOS notifications via the view hierarchy or accessibility APIs. When a notification matches a rule, wake the agent and execute the associated task.
 - **This is what makes it OpenClaw for mobile** — OpenClaw reacts to messages on WhatsApp/Telegram/Slack. We'd react to iOS notifications and Messages. Same concept, native mobile implementation.
+- **Shortcut Copilot** — Agent detects repeated patterns and proposes a reusable automation ("I can set this up as an automation shortcut so next time it's instant. Proceed?"). Goal: minimize manual Shortcut authoring while preserving explicit user consent.
+- **Server-side trigger bridge (email/3rd-party messages)** — For sources iOS cannot monitor freely, run trigger detection in backend (Gmail/IMAP/webhooks), then dispatch tasks to phone agent/worker.
 
 ## App Replacement
 
 - **Native App Intent for Action Button** — Replace the Shortcuts-based Action Button with a native `AppIntent` in the companion app. Would allow: `SFSpeechRecognizer` for voice capture, custom listening UI, direct Live Activity start, and no dependency on the Shortcuts app. The companion app becomes the single entry point: Action Button press, voice input, agent control, Dynamic Island progress, stop button — all in one app.
+
+## Research Constraints (platform reality)
+
+- **Why control plane exists at all** — iOS app sandbox prevents unrestricted cross-app touch/type/process control from normal third-party apps.
+- **Why XCUITest/WDA feels "Mac-bound"** — real-device provisioning/signing and test-runner lifecycle are orchestrated through Apple's developer toolchain and host workflows.
+- **No reliable stock-iOS loophole found** — realistic paths are:
+  1. developer automation channel with host/worker,
+  2. hosted remote worker abstraction,
+  3. jailbreak-only approaches (not product-safe).
